@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestão de Revendas - Semijoias</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;600;700&family=Montserrat:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="loginScreen" class="screen active">
+        <div class="login-container">
+            <div class="login-brand">
+                <div class="brand-icon">💎</div>
+                <h1 class="brand-title">Gestão Semijoias</h1>
+                <p class="brand-subtitle">Sistema de Vendas em Consignação</p>
+            </div>
+            
+            <div class="login-form">
+                <input type="email" id="loginEmail" placeholder="E-mail" class="input-field">
+                <input type="password" id="loginPassword" placeholder="Senha" class="input-field">
+                <button onclick="handleLogin()" class="btn-primary">Entrar</button>
+                <p class="login-footer">Não tem cadastro? Entre em contato com o administrador</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="loading-spinner"></div>
+        <p>Carregando...</p>
+    </div>
+
+    <!-- Admin Screen -->
+    <div id="adminScreen" class="screen">
+        <header class="header">
+            <div class="header-content">
+                <h1 class="header-title">Painel Administrativo</h1>
+                <button onclick="logout()" class="btn-logout">Sair</button>
+            </div>
+        </header>
+
+        <div class="container">
+            <div class="admin-tabs">
+                <button class="tab-btn" onclick="switchAdminTab('dashboard')">Dashboard</button>
+                <button class="tab-btn active" onclick="switchAdminTab('products')">Produtos</button>
+                <button class="tab-btn" onclick="switchAdminTab('resellers')">Revendedoras</button>
+                <button class="tab-btn" onclick="switchAdminTab('orders')">Pedidos</button>
+            </div>
+
+            <!-- Dashboard Tab -->
+            <div id="adminDashboard" class="admin-tab-content">
+                <div class="section-header">
+                    <h2>Visão Geral de Vendas</h2>
+                    <select id="dashboardResellerFilter" class="input-field" style="width: auto; margin-bottom: 0;" onchange="loadAdminDashboard()">
+                        <option value="">Todas as Revendedoras</option>
+                    </select>
+                </div>
+                <div class="dashboard-grid" style="margin-bottom: 30px;">
+                    <div class="stat-card">
+                        <div class="stat-icon">💰</div>
+                        <div class="stat-info">
+                            <p class="stat-label">Vendas Totais (Geral)</p>
+                            <p class="stat-value" id="adminTotalSales">R$ 0,00</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🛍️</div>
+                        <div class="stat-info">
+                            <p class="stat-label">Quantidade de Vendas</p>
+                            <p class="stat-value" id="adminTotalCount">0</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="charts-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
+                    <div class="chart-container" style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                        <canvas id="salesChart"></canvas>
+                    </div>
+                    <div class="chart-container" style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                        <canvas id="categoryChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Products Tab -->
+            <div id="adminProducts" class="admin-tab-content active">
+                <div class="section-header">
+                    <h2>Gerenciar Produtos</h2>
+                    <button onclick="showImportModal()" class="btn-secondary">Importar Planilha</button>
+                </div>
+
+                <div class="product-form">
+                    <h3>Adicionar Produto Manualmente</h3>
+                    <div class="form-grid">
+                        <input type="text" id="productName" placeholder="Nome do Produto" class="input-field">
+                        <input type="text" id="productCode" placeholder="Código de Referência" class="input-field">
+                        <input type="text" id="productCategory" placeholder="Categoria" class="input-field">
+                        <input type="number" id="productQuantity" placeholder="Quantidade" class="input-field">
+                        <input type="number" id="productPrice" placeholder="Preço (R$)" step="0.01" class="input-field">
+                        <input type="text" id="productBarcode" placeholder="Código de Barras (opcional)" class="input-field">
+                    </div>
+                    <button onclick="addProduct()" class="btn-primary">Adicionar Produto</button>
+                </div>
+
+                <div class="products-list">
+                    <h3>Produtos Cadastrados</h3>
+                    <div id="adminProductsList"></div>
+                </div>
+            </div>
+
+            <!-- Resellers Tab -->
+            <div id="adminResellers" class="admin-tab-content">
+                <div class="section-header">
+                    <h2>Gerenciar Revendedoras</h2>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <input type="month" id="resellerMonthFilter" class="input-field" style="margin-bottom: 0; width: auto;" onchange="loadResellers()">
+                        <button onclick="showAddResellerModal()" class="btn-secondary">Adicionar Revendedora</button>
+                    </div>
+                </div>
+
+                <div id="resellersList"></div>
+            </div>
+
+            <!-- Orders Tab -->
+            <div id="adminOrders" class="admin-tab-content">
+                <div class="section-header">
+                    <h2>Gerenciar Pedidos</h2>
+                </div>
+
+                <div class="order-form">
+                    <h3>Criar Novo Pedido</h3>
+                    <select id="orderReseller" class="input-field">
+                        <option value="">Selecione a Revendedora</option>
+                    </select>
+                    <div id="orderProductsSelection"></div>
+                    <button onclick="createOrder()" class="btn-primary">Criar Pedido</button>
+                </div>
+
+                <div id="ordersList"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reseller Screen -->
+    <div id="resellerScreen" class="screen">
+        <header class="header">
+            <div class="header-content">
+                <h1 class="header-title" id="resellerName">Minhas Vendas</h1>
+                <button onclick="logout()" class="btn-logout">Sair</button>
+            </div>
+        </header>
+
+        <nav class="bottom-nav">
+            <button class="nav-btn active" onclick="switchTab('dashboard')" data-tab="dashboard">
+                <span class="nav-icon">📊</span>
+                <span class="nav-label">Dashboard</span>
+            </button>
+            <button class="nav-btn" onclick="switchTab('sales')" data-tab="sales">
+                <span class="nav-icon">🛍️</span>
+                <span class="nav-label">Vendas</span>
+            </button>
+            <button class="nav-btn" onclick="switchTab('goals')" data-tab="goals">
+                <span class="nav-icon">🎯</span>
+                <span class="nav-label">Metas</span>
+            </button>
+            <button class="nav-btn" onclick="switchTab('payments')" data-tab="payments">
+                <span class="nav-icon">💳</span>
+                <span class="nav-label">Pagamentos</span>
+            </button>
+            <button class="nav-btn" onclick="switchTab('clients')" data-tab="clients">
+                <span class="nav-icon">👥</span>
+                <span class="nav-label">Clientes</span>
+            </button>
+        </nav>
+
+        <div class="container">
+            <!-- Dashboard Tab -->
+            <div id="dashboardTab" class="tab-content active">
+                <div class="dashboard-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">💰</div>
+                        <div class="stat-info">
+                            <p class="stat-label">Total em Vendas</p>
+                            <p class="stat-value" id="totalSales">R$ 0,00</p>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon">🎯</div>
+                        <div class="stat-info">
+                            <p class="stat-label">Meta do Mês</p>
+                            <p class="stat-value" id="monthGoal">R$ 0,00</p>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon">📈</div>
+                        <div class="stat-info">
+                            <p class="stat-label">Minha Comissão</p>
+                            <p class="stat-value" id="totalCommission">R$ 0,00</p>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon">📅</div>
+                        <div class="stat-info">
+                            <p class="stat-label">Data de Acerto</p>
+                            <p class="stat-value" id="settlementDate">--/--/----</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="progress-section">
+                    <h3>Progresso da Meta</h3>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <p class="progress-text" id="progressText">0% da meta atingida</p>
+                </div>
+
+                <div class="recent-sales">
+                    <h3>Vendas Recentes</h3>
+                    <div id="recentSalesList"></div>
+                </div>
+            </div>
+
+            <!-- Sales Tab -->
+            <div id="salesTab" class="tab-content">
+                <div class="section-header">
+                    <h2>Realizar Venda</h2>
+                    <button onclick="showBarcodeScanner()" class="btn-scan">📷 Escanear</button>
+                </div>
+
+                <div class="search-bar">
+                    <input type="text" id="productSearch" placeholder="Pesquisar produto..." class="input-field" oninput="searchProducts()">
+                </div>
+
+                <div id="productsList" class="products-grid"></div>
+
+                <div class="sales-history">
+                    <h3>Produtos Vendidos</h3>
+                    <div id="soldProductsList"></div>
+                </div>
+            </div>
+
+            <!-- Goals Tab -->
+            <div id="goalsTab" class="tab-content">
+                <div class="section-header">
+                    <h2>Minhas Metas</h2>
+                </div>
+
+                <div class="goal-form">
+                    <h3>Configurar Meta</h3>
+                    <input type="number" id="goalAmount" placeholder="Meta de Lucro (R$)" class="input-field">
+                    <input type="date" id="goalSettlementDate" class="input-field">
+                    <label class="input-label">Data de Acerto</label>
+                </div>
+
+                <div class="commission-tiers">
+                    <h3>Margens de Comissão</h3>
+                    <div id="commissionTiersList"></div>
+                    <button onclick="addCommissionTier()" class="btn-secondary">+ Adicionar Margem</button>
+                </div>
+
+                <button onclick="saveGoals()" class="btn-primary">Salvar Configurações</button>
+            </div>
+
+            <!-- Payments Tab -->
+            <div id="paymentsTab" class="tab-content">
+                <div class="section-header">
+                    <h2>Controle de Pagamentos</h2>
+                </div>
+
+                <div class="filters">
+                    <select id="paymentFilter" onchange="filterPayments()" class="input-field">
+                        <option value="all">Todos</option>
+                        <option value="paid">Pagos</option>
+                        <option value="pending">Pendentes</option>
+                        <option value="installment">Parcelados</option>
+                    </select>
+                </div>
+
+                <div id="paymentsList"></div>
+            </div>
+
+            <!-- Clients Tab -->
+            <div id="clientsTab" class="tab-content">
+                <div class="section-header">
+                    <h2>Meus Clientes</h2>
+                    <button onclick="showAddClientModal()" class="btn-secondary">+ Adicionar Cliente</button>
+                </div>
+
+                <div class="search-bar">
+                    <input type="text" id="clientSearch" placeholder="Pesquisar cliente..." class="input-field" oninput="searchClients()">
+                </div>
+
+                <div id="clientsList"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div id="saleModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeSaleModal()">&times;</span>
+            <h2>Registrar Venda</h2>
+            <div id="saleProductInfo"></div>
+            <select id="saleClient" class="input-field" onchange="handleSaleClientChange()">
+                <option value="">Selecione o Cliente</option>
+            </select>
+            <input type="text" id="quickClientName" placeholder="Nome do Novo Cliente" class="input-field" style="display: none;">
+            <button onclick="confirmSale()" class="btn-primary">Confirmar Venda</button>
+        </div>
+    </div>
+
+    <div id="paymentModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closePaymentModal()">&times;</span>
+            <h2>Registrar Pagamento</h2>
+            <div id="paymentSaleInfo"></div>
+            <select id="paymentMethod" class="input-field">
+                <option value="">Forma de Pagamento</option>
+                <option value="money">Dinheiro</option>
+                <option value="credit">Cartão de Crédito</option>
+                <option value="debit">Cartão de Débito</option>
+                <option value="pix">PIX</option>
+                <option value="transfer">Transferência</option>
+            </select>
+            <div class="installment-section">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="hasInstallment" onchange="toggleInstallments()">
+                    Pagamento Parcelado
+                </label>
+                <div id="installmentFields" style="display: none;">
+                    <input type="number" id="installmentCount" placeholder="Número de Parcelas" class="input-field" min="2" max="12">
+                    <input type="number" id="installmentValue" placeholder="Valor da Parcela (R$)" class="input-field" step="0.01">
+                </div>
+            </div>
+            <button onclick="confirmPayment()" class="btn-primary">Confirmar Pagamento</button>
+        </div>
+    </div>
+
+    <div id="clientModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeClientModal()">&times;</span>
+            <h2>Adicionar Cliente</h2>
+            <input type="text" id="clientName" placeholder="Nome Completo" class="input-field">
+            <input type="tel" id="clientPhone" placeholder="Telefone" class="input-field">
+            <input type="email" id="clientEmail" placeholder="E-mail (opcional)" class="input-field">
+            <textarea id="clientNotes" placeholder="Observações (opcional)" class="input-field" rows="3"></textarea>
+            <button onclick="saveClient()" class="btn-primary">Salvar Cliente</button>
+        </div>
+    </div>
+
+    <div id="editClientModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeEditClientModal()">&times;</span>
+            <h2>Editar Cliente</h2>
+            <input type="text" id="editClientName" placeholder="Nome Completo" class="input-field">
+            <input type="tel" id="editClientPhone" placeholder="Telefone" class="input-field">
+            <input type="email" id="editClientEmail" placeholder="E-mail (opcional)" class="input-field">
+            <textarea id="editClientNotes" placeholder="Observações (opcional)" class="input-field" rows="3"></textarea>
+            <button onclick="saveClientEdit()" class="btn-primary">Salvar Alterações</button>
+        </div>
+    </div>
+
+    <div id="clientHistoryModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeClientHistoryModal()">&times;</span>
+            <h2 id="historyClientName">Histórico de Compras</h2>
+            <div id="clientHistoryList" class="history-list" style="max-height: 400px; overflow-y: auto; margin-top: 15px;"></div>
+        </div>
+    </div>
+
+    <div id="importModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeImportModal()">&times;</span>
+            <h2>Importar Produtos</h2>
+            <p class="import-instructions">Faça upload de um arquivo Excel (.xlsx) ou CSV com as colunas: Nome, Código, Categoria, Quantidade, Preço</p>
+            <input type="file" id="importFile" accept=".xlsx,.xls,.csv" class="input-field">
+            <button onclick="importProducts()" class="btn-primary">Importar</button>
+        </div>
+    </div>
+
+    <div id="addResellerModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeAddResellerModal()">&times;</span>
+            <h2>Adicionar Revendedora</h2>
+            <input type="text" id="newResellerName" placeholder="Nome Completo" class="input-field">
+            <input type="email" id="resellerEmail" placeholder="E-mail" class="input-field">
+            <input type="password" id="resellerPassword" placeholder="Senha" class="input-field">
+            <input type="tel" id="resellerPhone" placeholder="Telefone" class="input-field">
+            <button onclick="saveReseller()" class="btn-primary">Salvar Revendedora</button>
+        </div>
+    </div>
+
+    <div id="editSaleModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeEditSaleModal()">&times;</span>
+            <h2>Editar Venda</h2>
+            <div id="editSaleInfo" style="margin-bottom: 15px;"></div>
+            <select id="editSaleClient" class="input-field"></select>
+            <button onclick="saveSaleEdit()" class="btn-primary">Salvar Alterações</button>
+        </div>
+    </div>
+
+    <div id="barcodeScannerModal" class="modal">
+        <div class="modal-content scanner-content">
+            <span class="close" onclick="closeBarcodeScanner()">&times;</span>
+            <h2>Escanear Código de Barras</h2>
+            <div id="scannerContainer">
+                <video id="scannerVideo" autoplay></video>
+                <canvas id="scannerCanvas" style="display: none;"></canvas>
+            </div>
+            <p id="scannerResult"></p>
+        </div>
+    </div>
+
+    <div id="resellerSalesModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeResellerSalesModal()">&times;</span>
+            <h2 id="resellerSalesTitle">Vendas da Revendedora</h2>
+            <div id="resellerSalesList" class="history-list" style="max-height: 400px; overflow-y: auto; margin-top: 15px;"></div>
+            <div id="resellerSalesTotal" style="margin-top: 15px; font-weight: bold; text-align: right; font-size: 1.2em; color: #2c1810;"></div>
+        </div>
+    </div>
+
+    <div id="editProductModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeEditProductModal()">&times;</span>
+            <h2>Editar Produto</h2>
+            <input type="text" id="editProductName" placeholder="Nome do Produto" class="input-field">
+            <input type="text" id="editProductCode" placeholder="Código de Referência" class="input-field">
+            <input type="text" id="editProductCategory" placeholder="Categoria" class="input-field">
+            <input type="number" id="editProductQuantity" placeholder="Quantidade" class="input-field">
+            <input type="number" id="editProductPrice" placeholder="Preço (R$)" step="0.01" class="input-field">
+            <input type="text" id="editProductBarcode" placeholder="Código de Barras" class="input-field">
+            <button onclick="saveProductEdit()" class="btn-primary">Salvar Alterações</button>
+        </div>
+    </div>
+
+    <div id="editResellerModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeEditResellerModal()">&times;</span>
+            <h2>Editar Revendedora</h2>
+            <input type="text" id="editResellerName" placeholder="Nome Completo" class="input-field">
+            <input type="email" id="editResellerEmail" placeholder="E-mail" class="input-field">
+            <input type="tel" id="editResellerPhone" placeholder="Telefone" class="input-field">
+            <button onclick="saveResellerEdit()" class="btn-primary">Salvar Alterações</button>
+        </div>
+    </div>
+
+    <div id="editOrderModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeEditOrderModal()">&times;</span>
+            <h2>Editar Pedido</h2>
+            <select id="editOrderReseller" class="input-field">
+                <option value="">Selecione a Revendedora</option>
+            </select>
+            <div id="editOrderProductsSelection"></div>
+            <button onclick="saveOrderEdit()" class="btn-primary">Salvar Alterações</button>
+        </div>
+    </div>
+
+    <div id="editPaymentModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeEditPaymentModal()">&times;</span>
+            <h2>Editar Pagamento</h2>
+            <select id="editPaymentMethod" class="input-field">
+                <option value="">Forma de Pagamento</option>
+                <option value="money">Dinheiro</option>
+                <option value="credit">Cartão de Crédito</option>
+                <option value="debit">Cartão de Débito</option>
+                <option value="pix">PIX</option>
+                <option value="transfer">Transferência</option>
+            </select>
+            <div class="installment-section">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="editHasInstallment" onchange="toggleEditInstallments()">
+                    Pagamento Parcelado
+                </label>
+                <div id="editInstallmentFields" style="display: none;">
+                    <input type="number" id="editInstallmentCount" placeholder="Número de Parcelas" class="input-field" min="2" max="12">
+                    <input type="number" id="editInstallmentValue" placeholder="Valor da Parcela (R$)" class="input-field" step="0.01">
+                </div>
+            </div>
+            <button onclick="savePaymentEdit()" class="btn-primary">Salvar Alterações</button>
+        </div>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+    
+    <!-- External Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@zxing/library@latest/umd/index.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- Firebase Config -->
+    <script src="firebase-config.js"></script>
+    
+    <!-- App Script -->
+    <script src="script.js"></script>
+</body>
+</html>
