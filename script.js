@@ -2875,20 +2875,22 @@ async function loadPayments() {
             if (payment && payment.installments) {
                 // Se não tiver a lista salva (legado), gera uma visualização padrão
                 const list = payment.installmentsList || Array.from({length: payment.installments}, (_, i) => ({
-                    number: i + 1, status: 'pending', paidAt: null
+                    number: i + 1, status: 'pending', paidAt: null, value: payment.installmentValue
                 }));
 
                 installmentsHtml = `<div class="installments-container" style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #eee;">
                     <p style="font-size: 0.9em; font-weight: 600; margin-bottom: 5px; color: #555;">Controle de Parcelas:</p>
-                    ${list.map((inst, idx) => `
+                    ${list.map((inst, idx) => {
+                        const currentVal = inst.value !== undefined ? inst.value : payment.installmentValue;
+                        return `
                         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; font-size: 0.9em; background: ${inst.status === 'paid' ? '#f0fff4' : '#fff'}; padding: 5px; border-radius: 4px; border: 1px solid ${inst.status === 'paid' ? '#c3e6cb' : '#eee'};">
                             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; flex: 1;">
-                                <input type="checkbox" ${inst.status === 'paid' ? 'checked' : ''} onchange="handleInstallmentCheck('${payment.id}', ${idx}, this)">
-                                <span style="${inst.status === 'paid' ? 'text-decoration: line-through; color: #888;' : ''}">${inst.number}ª Parc. - ${formatCurrency(payment.installmentValue)}</span>
+                                <input type="checkbox" ${inst.status === 'paid' ? 'checked' : ''} onchange="handleInstallmentCheck('${payment.id}', ${idx}, this, ${currentVal})">
+                                <span style="${inst.status === 'paid' ? 'text-decoration: line-through; color: #888;' : ''}">${inst.number}ª Parc. - ${formatCurrency(currentVal)}</span>
                             </label>
                             ${inst.status === 'paid' && inst.paidAt ? `<span style="font-size: 0.8em; color: #28a745;">${formatDate(inst.paidAt)}</span>` : ''}
                         </div>
-                    `).join('')}
+                    `}).join('')}
                 </div>`;
             }
             
@@ -2927,7 +2929,7 @@ async function loadPayments() {
 
 let currentInstallmentParams = null;
 
-function handleInstallmentCheck(paymentId, index, checkbox) {
+function handleInstallmentCheck(paymentId, index, checkbox, currentValue) {
     if (checkbox.checked) {
         checkbox.checked = false; // Espera a seleção da data
         currentInstallmentParams = { paymentId, index };
@@ -2935,6 +2937,7 @@ function handleInstallmentCheck(paymentId, index, checkbox) {
         // Abrir modal de data
         const modal = document.getElementById('installmentDateModal');
         document.getElementById('installmentDateInput').valueAsDate = new Date(); // Data de hoje como padrão
+        document.getElementById('installmentAmountInput').value = currentValue; // Preencher com valor atual
         modal.classList.add('active');
     } else {
         // Desmarcar
@@ -2948,20 +2951,23 @@ function handleInstallmentCheck(paymentId, index, checkbox) {
 
 async function confirmInstallmentDate() {
     const dateStr = document.getElementById('installmentDateInput').value;
-    if (!dateStr) return;
+    const amountStr = document.getElementById('installmentAmountInput').value;
+    
+    if (!dateStr || !amountStr) return;
     
     // Criar timestamp corrigindo fuso horário local
     const [year, month, day] = dateStr.split('-').map(Number);
     const dateObj = new Date(year, month - 1, day);
+    const amount = parseFloat(amountStr);
     
     if (currentInstallmentParams) {
-        await updateInstallmentStatus(currentInstallmentParams.paymentId, currentInstallmentParams.index, dateObj.getTime());
+        await updateInstallmentStatus(currentInstallmentParams.paymentId, currentInstallmentParams.index, dateObj.getTime(), amount);
         document.getElementById('installmentDateModal').classList.remove('active');
         currentInstallmentParams = null;
     }
 }
 
-async function updateInstallmentStatus(paymentId, index, dateTimestamp) {
+async function updateInstallmentStatus(paymentId, index, dateTimestamp, paidAmount) {
     showLoading();
     try {
         const snapshot = await paymentsRef.child(paymentId).once('value');
@@ -2969,11 +2975,80 @@ async function updateInstallmentStatus(paymentId, index, dateTimestamp) {
         
         // Se não existir lista (pagamentos antigos), cria agora
         let list = payment.installmentsList || Array.from({length: payment.installments}, (_, i) => ({
-            number: i + 1, status: 'pending', paidAt: null
+            number: i + 1, status: 'pending', paidAt: null, value: payment.installmentValue
         }));
         
-        list[index].status = dateTimestamp ? 'paid' : 'pending';
-        list[index].paidAt = dateTimestamp;
+        // Garantir que todos tenham valor definido (para compatibilidade)
+        list.forEach(item => {
+            if (item.value === undefined) item.value = payment.installmentValue;
+            item.value = parseFloat(item.value);
+        });
+
+        // 1. Atualizar o item alvo (marcar como pago ou pendente)
+        if (dateTimestamp) {
+            list[index].status = 'paid';
+            list[index].paidAt = dateTimestamp;
+            if (paidAmount !== undefined) {
+                list[index].value = parseFloat(paidAmount);
+            }
+        } else {
+            list[index].status = 'pending';
+            list[index].paidAt = null;
+            // O valor será redefinido no recálculo abaixo
+        }
+
+        // 2. Recalcular toda a cadeia de valores para corrigir distorções
+        const baseValue = parseFloat(payment.installmentValue);
+        let remainder = 0;
+        const originalCount = payment.installments;
+
+        for (let i = 0; i < list.length; i++) {
+            // Se for uma parcela original, o valor base é o definido na venda. Se for extra, é 0.
+            let currentBase = (i < originalCount) ? baseValue : 0;
+            
+            // O valor esperado é o base + o que sobrou das anteriores
+            let expected = currentBase + remainder;
+            
+            if (list[i].status === 'paid') {
+                // Se está paga, o valor é fixo (o que foi pago).
+                // A diferença entre o esperado e o pago vai para o resto.
+                remainder = expected - list[i].value;
+            } else {
+                // Se está pendente, ela absorve o resto.
+                if (expected <= 0.01) {
+                    // Se o valor esperado for 0 ou negativo, significa que já foi coberto por pagamentos anteriores.
+                    list[i].value = 0;
+                    list[i].status = 'paid'; // Marca como paga automaticamente
+                    if (!list[i].paidAt) list[i].paidAt = Date.now();
+                    remainder = expected; // O valor negativo continua para abater as próximas se houver
+                } else {
+                    list[i].value = expected;
+                    list[i].status = 'pending'; // Garante status pendente se tiver valor a pagar
+                    list[i].paidAt = null;
+                    remainder = 0; // Dívida absorvida
+                }
+            }
+        }
+
+        // 3. Se sobrou dívida no final, criar nova parcela
+        if (remainder > 0.01) {
+            list.push({
+                number: list.length + 1,
+                status: 'pending',
+                paidAt: null,
+                value: remainder
+            });
+        }
+
+        // 4. Limpar parcelas extras que ficaram zeradas/pagas automaticamente (limpeza)
+        while (list.length > originalCount) {
+            const last = list[list.length - 1];
+            if (last.value <= 0.01 && last.status === 'paid') {
+                list.pop();
+            } else {
+                break;
+            }
+        }
         
         await paymentsRef.child(paymentId).update({ installmentsList: list });
         
