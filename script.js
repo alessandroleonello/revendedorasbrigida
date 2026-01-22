@@ -1955,7 +1955,7 @@ async function openSettlementModal() {
             if (order.status === 'active' && order.products) {
                 order.products.forEach(pid => {
                     if (allProducts[pid] && !processedProductIds.has(pid)) {
-                        totalItemsReceived++;
+                        totalItemsReceived += parseInt(allProducts[pid].quantity) || 1;
                         processedProductIds.add(pid);
                     }
                 });
@@ -2626,7 +2626,8 @@ async function loadGoalsForm() {
             if (order.status === 'active' && order.products) {
                 order.products.forEach(pid => {
                     if (allProducts[pid] && !processedProductIds.has(pid)) {
-                        totalStockValue += (Number(allProducts[pid].price) || 0);
+                        const qty = parseInt(allProducts[pid].quantity) || 1;
+                        totalStockValue += (Number(allProducts[pid].price) || 0) * qty;
                         processedProductIds.add(pid);
                     }
                 });
