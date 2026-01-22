@@ -1892,10 +1892,69 @@ async function updateDashboard() {
         // Adicionar botão de Solicitar Acerto se não existir
         renderSettlementButton();
 
+        // Carregar Ranking
+        await loadResellerRanking();
+
         hideLoading();
     } catch (error) {
         hideLoading();
         console.error('Erro ao atualizar dashboard:', error);
+    }
+}
+
+async function loadResellerRanking() {
+    try {
+        // Buscar todas as vendas para calcular o ranking geral
+        const snapshot = await salesRef.once('value');
+        const sales = [];
+        snapshot.forEach(child => sales.push(child.val()));
+
+        const now = new Date();
+        const currentMonth = now.getMonth();
+        const currentYear = now.getFullYear();
+
+        // Filtrar vendas apenas deste mês
+        const monthlySales = sales.filter(s => {
+            const d = new Date(s.date);
+            return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+        });
+
+        // Agrupar totais por revendedora
+        const rankingMap = {};
+        monthlySales.forEach(s => {
+            rankingMap[s.resellerId] = (rankingMap[s.resellerId] || 0) + s.price;
+        });
+
+        // Converter para lista e ordenar (maior para menor)
+        const rankingList = Object.keys(rankingMap).map(uid => ({
+            uid,
+            total: rankingMap[uid]
+        })).sort((a, b) => b.total - a.total);
+
+        // Encontrar posição da revendedora atual
+        const myIndex = rankingList.findIndex(r => r.uid === currentUser.uid);
+        const rankValueEl = document.getElementById('resellerRankingValue');
+        const rankMsgEl = document.getElementById('resellerRankingMessage');
+
+        if (myIndex === -1) {
+            rankValueEl.textContent = '-';
+            rankMsgEl.textContent = 'Faça sua primeira venda para entrar no ranking!';
+        } else {
+            const myRank = myIndex + 1;
+            rankValueEl.textContent = `${myRank}º Lugar`;
+
+            if (myRank === 1) {
+                rankMsgEl.textContent = 'Parabéns! Você lidera o ranking! 🥇';
+                rankMsgEl.style.color = '#28a745';
+            } else {
+                const prevReseller = rankingList[myIndex - 1];
+                const diff = prevReseller.total - rankingList[myIndex].total;
+                rankMsgEl.textContent = `Faltam ${formatCurrency(diff)} para alcançar o ${myRank - 1}º lugar`;
+                rankMsgEl.style.color = '#d4a574';
+            }
+        }
+    } catch (error) {
+        console.error('Erro ao carregar ranking:', error);
     }
 }
 
