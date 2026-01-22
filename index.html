@@ -333,8 +333,8 @@
                     Pagamento Parcelado
                 </label>
                 <div id="installmentFields" style="display: none;">
-                    <input type="number" id="installmentCount" placeholder="Número de Parcelas" class="input-field" min="2" max="12">
-                    <input type="number" id="installmentValue" placeholder="Valor da Parcela (R$)" class="input-field" step="0.01">
+                    <input type="number" id="installmentCount" placeholder="Número de Parcelas" class="input-field" min="2" max="24" oninput="generateInstallmentInputs()">
+                    <div id="dynamicInstallmentsContainer" style="margin-top: 10px; max-height: 200px; overflow-y: auto; padding-right: 5px;"></div>
                 </div>
             </div>
             <button onclick="confirmPayment()" class="btn-primary">Confirmar Pagamento</button>
@@ -488,8 +488,8 @@
                     Pagamento Parcelado
                 </label>
                 <div id="editInstallmentFields" style="display: none;">
-                    <input type="number" id="editInstallmentCount" placeholder="Número de Parcelas" class="input-field" min="2" max="12">
-                    <input type="number" id="editInstallmentValue" placeholder="Valor da Parcela (R$)" class="input-field" step="0.01">
+                    <input type="number" id="editInstallmentCount" placeholder="Número de Parcelas" class="input-field" min="2" max="24" oninput="generateEditInstallmentInputs()">
+                    <div id="editDynamicInstallmentsContainer" style="margin-top: 10px; max-height: 200px; overflow-y: auto; padding-right: 5px;"></div>
                 </div>
             </div>
             <button onclick="savePaymentEdit()" class="btn-primary">Salvar Alterações</button>
