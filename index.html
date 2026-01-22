@@ -421,6 +421,13 @@
         <div class="modal-content">
             <span class="close" onclick="closeResellerSalesModal()">&times;</span>
             <h2 id="resellerSalesTitle">Vendas da Revendedora</h2>
+            
+            <select id="resellerSalesTypeFilter" class="input-field" style="margin-bottom: 15px;" onchange="filterResellerSalesList()">
+                <option value="all">Todos os Registros</option>
+                <option value="product">Apenas Produtos</option>
+                <option value="settlement">Apenas Acertos</option>
+            </select>
+
             <div id="resellerSalesList" class="history-list" style="max-height: 400px; overflow-y: auto; margin-top: 15px;"></div>
             <div id="resellerSalesTotal" style="margin-top: 15px; font-weight: bold; text-align: right; font-size: 1.2em; color: #2c1810;"></div>
         </div>

@@ -525,14 +525,44 @@ async function finalizeSettlement(settlementId) {
 
     showLoading();
     try {
+        // 1. Buscar dados do acerto para registrar o pagamento
+        const snapshot = await settlementsRef.child(settlementId).once('value');
+        const settlement = snapshot.val();
+
+        if (!settlement) throw new Error('Acerto não encontrado');
+
+        // 2. Atualizar status
         await settlementsRef.child(settlementId).update({
             status: 'completed',
             finalizedAt: firebase.database.ServerValue.TIMESTAMP
         });
         
+        // 3. Criar registro na tabela de vendas (Valor que a revendedora paga)
+        const amountDue = settlement.totalSold - settlement.totalCommission;
+        
+        if (amountDue > 0) {
+            const saleId = generateId();
+            await salesRef.child(saleId).set({
+                resellerId: settlement.resellerId,
+                productId: 'ACERTO', // ID fixo para passar na validação
+                productName: 'Pagamento de Acerto',
+                price: amountDue,
+                clientId: 'ADMIN',
+                clientName: 'Acerto de Contas',
+                date: firebase.database.ServerValue.TIMESTAMP,
+                paymentStatus: 'paid',
+                category: 'Financeiro'
+            });
+        }
+
         hideLoading();
-        showNotification('Acerto finalizado com sucesso!');
+        showNotification('Acerto finalizado e valor registrado nas vendas!');
         loadPendingSettlements();
+        
+        // Atualizar dashboard se estiver na tela para refletir o novo valor
+        if (document.getElementById('adminDashboard').classList.contains('active')) {
+            loadAdminDashboard();
+        }
     } catch (error) {
         hideLoading();
         console.error('Erro ao finalizar acerto:', error);
@@ -855,7 +885,7 @@ async function importProducts() {
                 const name = row.Nome || row.nome || row.Produto || row.produto;
                 const code = row.Código || row.codigo || row.Codigo || row.Referência || row.referencia;
                 const category = row.Categoria || row.categoria;
-                const quantity = parseInt(row.Quantidade || row.quantidade || row.Qtd || row.qtd || 1);
+                const quantity = parseInt(row.Quantidade || row.quantidade || row.Qtd || row.qtd || row.Quant || row.quant || 1);
                 const price = parseFloat(row.Preço || row.preco || row.Preco || row.Valor || row.valor || 0);
                 const barcode = row['Código de Barras'] || row['codigo de barras'] || row.Barcode || row.barcode || '';
 
@@ -1150,6 +1180,8 @@ async function saveResellerEdit() {
     }
 }
 
+let currentResellerSalesData = [];
+
 async function viewResellerSales(resellerId) {
     showLoading();
     
@@ -1180,33 +1212,20 @@ async function viewResellerSales(resellerId) {
         const userSnapshot = await usersRef.child(resellerId).once('value');
         const reseller = userSnapshot.val();
 
-        const total = filteredSales.reduce((sum, sale) => sum + sale.price, 0);
+        // Armazenar dados para filtragem
+        currentResellerSalesData = filteredSales;
         
         const dateObj = new Date(filterYear, filterMonth - 1);
         const monthName = dateObj.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
 
         document.getElementById('resellerSalesTitle').textContent = `Vendas de ${reseller.name} - ${monthName}`;
         
-        const container = document.getElementById('resellerSalesList');
-        if (filteredSales.length === 0) {
-            container.innerHTML = '<p style="text-align: center; color: #666;">Nenhuma venda neste período.</p>';
-        } else {
-            container.innerHTML = filteredSales.reverse().map(sale => `
-                <div class="sale-item" style="background: #f9f9f9; padding: 10px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #eee;">
-                    <div class="sale-header" style="display: flex; justify-content: space-between; font-weight: 600;">
-                        <span>${sale.productName}</span>
-                        <span>${formatCurrency(sale.price)}</span>
-                    </div>
-                    <div class="sale-details" style="font-size: 0.9em; color: #666; margin-top: 5px;">
-                        Cliente: ${sale.clientName} <br>
-                        Data: ${formatDate(sale.date)} <br>
-                        Status: ${sale.paymentStatus === 'paid' ? 'Pago' : sale.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'}
-                    </div>
-                </div>
-            `).join('');
-        }
+        // Resetar filtro visual
+        const filterSelect = document.getElementById('resellerSalesTypeFilter');
+        if (filterSelect) filterSelect.value = 'all';
 
-        document.getElementById('resellerSalesTotal').textContent = `Total: ${formatCurrency(total)}`;
+        // Renderizar lista usando a nova função de filtro
+        filterResellerSalesList();
 
         document.getElementById('resellerSalesModal').classList.add('active');
         hideLoading();
@@ -1215,6 +1234,48 @@ async function viewResellerSales(resellerId) {
         console.error('Erro ao carregar vendas:', error);
         showNotification('Erro ao carregar detalhes das vendas', 'error');
     }
+}
+
+function filterResellerSalesList() {
+    const filterType = document.getElementById('resellerSalesTypeFilter').value;
+    const container = document.getElementById('resellerSalesList');
+    const totalContainer = document.getElementById('resellerSalesTotal');
+    
+    if (!currentResellerSalesData) return;
+
+    let displaySales = currentResellerSalesData;
+
+    // Filtrar por tipo
+    if (filterType === 'product') {
+        displaySales = currentResellerSalesData.filter(s => s.productId !== 'ACERTO');
+    } else if (filterType === 'settlement') {
+        displaySales = currentResellerSalesData.filter(s => s.productId === 'ACERTO');
+    }
+
+    const total = displaySales.reduce((sum, sale) => sum + sale.price, 0);
+
+    if (displaySales.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: #666;">Nenhum registro encontrado.</p>';
+    } else {
+        // Usar [...displaySales] para criar uma cópia antes de inverter, evitando mutação
+        container.innerHTML = [...displaySales].reverse().map(sale => {
+            const isSettlement = sale.productId === 'ACERTO';
+            return `
+            <div class="sale-item" style="background: ${isSettlement ? '#e8f5e9' : '#f9f9f9'}; padding: 10px; margin-bottom: 10px; border-radius: 4px; border: 1px solid ${isSettlement ? '#c3e6cb' : '#eee'};">
+                <div class="sale-header" style="display: flex; justify-content: space-between; font-weight: 600;">
+                    <span>${sale.productName}</span>
+                    <span>${formatCurrency(sale.price)}</span>
+                </div>
+                <div class="sale-details" style="font-size: 0.9em; color: #666; margin-top: 5px;">
+                    ${isSettlement ? '<strong>Tipo: Pagamento de Acerto</strong>' : `Cliente: ${sale.clientName}`} <br>
+                    Data: ${formatDate(sale.date)} <br>
+                    Status: ${sale.paymentStatus === 'paid' ? 'Pago' : sale.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'}
+                </div>
+            </div>
+        `}).join('');
+    }
+
+    totalContainer.textContent = `Total: ${formatCurrency(total)}`;
 }
 
 function closeResellerSalesModal() {
@@ -2156,9 +2217,14 @@ async function loadProducts() {
             };
         });
 
-        const soldProductIds = [];
+        const productSalesCount = {};
+        let totalSoldItems = 0;
+        let totalSoldValue = 0;
+
         salesSnapshot.forEach((child) => {
-            soldProductIds.push(child.val().productId);
+            const sale = child.val();
+            const pid = sale.productId;
+            productSalesCount[pid] = (productSalesCount[pid] || 0) + 1;
         });
 
         let products = [];
@@ -2189,22 +2255,30 @@ async function loadProducts() {
             return;
         }
         
-        const totalItems = products.length;
-        const soldProductsList = products.filter(p => soldProductIds.includes(p.id));
-        const soldItems = soldProductsList.length;
-
-        const totalValue = products.reduce((sum, p) => sum + (Number(p.price) || 0), 0);
-        const soldValue = soldProductsList.reduce((sum, p) => sum + (Number(p.price) || 0), 0);
+        // Calcular totais considerando quantidade
+        let totalItems = 0;
+        let totalValue = 0;
+        
+        products.forEach(p => {
+            const qty = parseInt(p.quantity) || 1;
+            totalItems += qty;
+            totalValue += (Number(p.price) || 0) * qty;
+            
+            const soldCount = productSalesCount[p.id] || 0;
+            const soldQty = Math.min(soldCount, qty); // Não contar mais que o existente
+            totalSoldItems += soldQty;
+            totalSoldValue += (Number(p.price) || 0) * soldQty;
+        });
 
         const summaryHtml = `
             <div style="width: 100%; grid-column: 1 / -1; margin-bottom: 15px; padding: 15px; background: #f8f9fa; border-radius: 8px; border: 1px solid #e9ecef;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                     <span style="font-weight: 500; color: #666;">Peças:</span>
-                    <span style="font-weight: bold; color: #2c1810; font-size: 1.1em;">${soldItems}/${totalItems}</span>
+                    <span style="font-weight: bold; color: #2c1810; font-size: 1.1em;">${totalSoldItems}/${totalItems}</span>
                 </div>
                 <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #dee2e6; padding-top: 8px; margin-bottom: 10px;">
                     <span style="font-weight: 500; color: #666;">Valor:</span>
-                    <span style="font-weight: bold; color: #2c1810; font-size: 1.1em;">${formatCurrency(soldValue)} / ${formatCurrency(totalValue)}</span>
+                    <span style="font-weight: bold; color: #2c1810; font-size: 1.1em;">${formatCurrency(totalSoldValue)} / ${formatCurrency(totalValue)}</span>
                 </div>
                 <button class="btn-secondary" onclick="openSimulatorModal()" style="width: 100%; padding: 8px; font-size: 0.9em; display: flex; align-items: center; justify-content: center; gap: 5px;">
                     🧮 Simular Comissão
@@ -2213,12 +2287,19 @@ async function loadProducts() {
         `;
 
         container.innerHTML = summaryHtml + products.map(product => {
-            const isSold = soldProductIds.includes(product.id);
+            const soldCount = productSalesCount[product.id] || 0;
+            const quantity = parseInt(product.quantity) || 1;
+            const isSold = soldCount >= quantity;
+            const remaining = Math.max(0, quantity - soldCount);
+
             return `
                 <div class="product-card ${isSold ? 'sold' : ''}" onclick="${isSold ? '' : `openSaleModal('${product.id}')`}">
                     <div class="product-name">${product.name}</div>
                     <div class="product-code">${product.code}</div>
                     <div class="product-price">${formatCurrency(product.price)}</div>
+                    <div class="product-quantity" style="font-size: 0.8em; color: ${isSold ? '#dc3545' : '#28a745'}; margin-top: 5px; font-weight: 500;">
+                        ${isSold ? 'Esgotado' : `Disponível: ${remaining}/${quantity}`}
+                    </div>
                 </div>
             `;
         }).join('');
