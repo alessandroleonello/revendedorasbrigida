@@ -2883,12 +2883,12 @@ async function loadPayments() {
                     ${list.map((inst, idx) => {
                         const currentVal = inst.value !== undefined ? inst.value : payment.installmentValue;
                         return `
-                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; font-size: 0.9em; background: ${inst.status === 'paid' ? '#f0fff4' : '#fff'}; padding: 5px; border-radius: 4px; border: 1px solid ${inst.status === 'paid' ? '#c3e6cb' : '#eee'};">
-                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; flex: 1;">
-                                <input type="checkbox" ${inst.status === 'paid' ? 'checked' : ''} onchange="handleInstallmentCheck('${payment.id}', ${idx}, this, ${currentVal})">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 0.95em; background: ${inst.status === 'paid' ? '#f0fff4' : '#fff'}; padding: 12px; border-radius: 6px; border: 1px solid ${inst.status === 'paid' ? '#c3e6cb' : '#eee'}; min-height: 48px;">
+                            <label style="display: flex; align-items: center; gap: 12px; cursor: pointer; flex: 1; width: 100%;">
+                                <input type="checkbox" style="width: 24px; height: 24px; min-width: 24px; cursor: pointer;" ${inst.status === 'paid' ? 'checked' : ''} onchange="handleInstallmentCheck('${payment.id}', ${idx}, this, ${currentVal})">
                                 <span style="${inst.status === 'paid' ? 'text-decoration: line-through; color: #888;' : ''}">${inst.number}ª Parc. - ${formatCurrency(currentVal)}</span>
                             </label>
-                            ${inst.status === 'paid' && inst.paidAt ? `<span style="font-size: 0.8em; color: #28a745;">${formatDate(inst.paidAt)}</span>` : ''}
+                            ${inst.status === 'paid' && inst.paidAt ? `<span style="font-size: 0.8em; color: #28a745; margin-left: 5px; white-space: nowrap;">${formatDate(inst.paidAt)}</span>` : ''}
                         </div>
                     `}).join('')}
                 </div>`;

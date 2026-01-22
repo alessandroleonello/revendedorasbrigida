@@ -499,9 +499,16 @@
     <div id="installmentDateModal" class="modal">
         <div class="modal-content" style="max-width: 400px;">
             <span class="close" onclick="document.getElementById('installmentDateModal').classList.remove('active')">&times;</span>
-            <h3>Data do Pagamento</h3>
-            <p style="margin-bottom: 15px; color: #666;">Quando esta parcela foi paga?</p>
-            <input type="date" id="installmentDateInput" class="input-field">
+            <h3>Confirmar Pagamento</h3>
+            
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; color: #666;">Data do Pagamento</label>
+                <input type="date" id="installmentDateInput" class="input-field">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; color: #666;">Valor Pago (R$)</label>
+                <input type="number" id="installmentAmountInput" class="input-field" step="0.01">
+            </div>
             <button onclick="confirmInstallmentDate()" class="btn-primary">Confirmar</button>
         </div>
     </div>
