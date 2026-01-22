@@ -2870,6 +2870,27 @@ async function loadPayments() {
         
         container.innerHTML = sales.reverse().map(sale => {
             const payment = payments[sale.id];
+            let installmentsHtml = '';
+
+            if (payment && payment.installments) {
+                // Se não tiver a lista salva (legado), gera uma visualização padrão
+                const list = payment.installmentsList || Array.from({length: payment.installments}, (_, i) => ({
+                    number: i + 1, status: 'pending', paidAt: null
+                }));
+
+                installmentsHtml = `<div class="installments-container" style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #eee;">
+                    <p style="font-size: 0.9em; font-weight: 600; margin-bottom: 5px; color: #555;">Controle de Parcelas:</p>
+                    ${list.map((inst, idx) => `
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; font-size: 0.9em; background: ${inst.status === 'paid' ? '#f0fff4' : '#fff'}; padding: 5px; border-radius: 4px; border: 1px solid ${inst.status === 'paid' ? '#c3e6cb' : '#eee'};">
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; flex: 1;">
+                                <input type="checkbox" ${inst.status === 'paid' ? 'checked' : ''} onchange="handleInstallmentCheck('${payment.id}', ${idx}, this)">
+                                <span style="${inst.status === 'paid' ? 'text-decoration: line-through; color: #888;' : ''}">${inst.number}ª Parc. - ${formatCurrency(payment.installmentValue)}</span>
+                            </label>
+                            ${inst.status === 'paid' && inst.paidAt ? `<span style="font-size: 0.8em; color: #28a745;">${formatDate(inst.paidAt)}</span>` : ''}
+                        </div>
+                    `).join('')}
+                </div>`;
+            }
             
             return `
                 <div class="payment-item">
@@ -2883,6 +2904,7 @@ async function loadPayments() {
                         <button class="btn-secondary" onclick="openEditPaymentModal('${payment.id}', '${sale.id}')" style="padding: 2px 8px; font-size: 10px; margin-left: 5px; background-color: #4a90e2; color: white; border: none; border-radius: 3px; cursor: pointer;">Editar</button>
                         <button class="btn-delete" onclick="deletePayment('${payment.id}', '${sale.id}')" style="padding: 2px 8px; font-size: 10px; margin-left: 5px; background-color: #dc3545; color: white; border: none; border-radius: 3px; cursor: pointer;">Excluir</button>` : ''}
                     </div>
+                    ${installmentsHtml}
                     <span class="payment-status ${sale.paymentStatus}">${
                         sale.paymentStatus === 'paid' ? 'Pago' : 
                         sale.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'
@@ -2900,6 +2922,73 @@ async function loadPayments() {
     } catch (error) {
         hideLoading();
         console.error('Erro ao carregar pagamentos:', error);
+    }
+}
+
+let currentInstallmentParams = null;
+
+function handleInstallmentCheck(paymentId, index, checkbox) {
+    if (checkbox.checked) {
+        checkbox.checked = false; // Espera a seleção da data
+        currentInstallmentParams = { paymentId, index };
+        
+        // Abrir modal de data
+        const modal = document.getElementById('installmentDateModal');
+        document.getElementById('installmentDateInput').valueAsDate = new Date(); // Data de hoje como padrão
+        modal.classList.add('active');
+    } else {
+        // Desmarcar
+        if (confirm('Deseja marcar esta parcela como pendente novamente?')) {
+             updateInstallmentStatus(paymentId, index, null);
+        } else {
+            checkbox.checked = true; // Reverte se cancelar
+        }
+    }
+}
+
+async function confirmInstallmentDate() {
+    const dateStr = document.getElementById('installmentDateInput').value;
+    if (!dateStr) return;
+    
+    // Criar timestamp corrigindo fuso horário local
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const dateObj = new Date(year, month - 1, day);
+    
+    if (currentInstallmentParams) {
+        await updateInstallmentStatus(currentInstallmentParams.paymentId, currentInstallmentParams.index, dateObj.getTime());
+        document.getElementById('installmentDateModal').classList.remove('active');
+        currentInstallmentParams = null;
+    }
+}
+
+async function updateInstallmentStatus(paymentId, index, dateTimestamp) {
+    showLoading();
+    try {
+        const snapshot = await paymentsRef.child(paymentId).once('value');
+        const payment = snapshot.val();
+        
+        // Se não existir lista (pagamentos antigos), cria agora
+        let list = payment.installmentsList || Array.from({length: payment.installments}, (_, i) => ({
+            number: i + 1, status: 'pending', paidAt: null
+        }));
+        
+        list[index].status = dateTimestamp ? 'paid' : 'pending';
+        list[index].paidAt = dateTimestamp;
+        
+        await paymentsRef.child(paymentId).update({ installmentsList: list });
+        
+        // Verificar se todas as parcelas foram pagas e atualizar status da venda
+        const allPaid = list.every(item => item.status === 'paid');
+        await salesRef.child(payment.saleId).update({
+            paymentStatus: allPaid ? 'paid' : 'installment'
+        });
+
+        hideLoading();
+        loadPayments();
+    } catch (error) {
+        hideLoading();
+        console.error(error);
+        showNotification('Erro ao atualizar parcela', 'error');
     }
 }
 
@@ -3087,13 +3176,24 @@ async function confirmPayment() {
 
     try {
         const paymentId = generateId();
-        await paymentsRef.child(paymentId).set({
+        const paymentData = {
             saleId: selectedSale.id,
             method: method,
             installments: installments,
             installmentValue: installmentValue,
             date: firebase.database.ServerValue.TIMESTAMP
-        });
+        };
+
+        // Criar lista de parcelas se for parcelado
+        if (hasInstallment) {
+            const installmentsList = [];
+            for (let i = 1; i <= installments; i++) {
+                installmentsList.push({ number: i, status: 'pending', paidAt: null });
+            }
+            paymentData.installmentsList = installmentsList;
+        }
+
+        await paymentsRef.child(paymentId).set(paymentData);
 
         await salesRef.child(selectedSale.id).update({
             paymentStatus: hasInstallment ? 'installment' : 'paid'
