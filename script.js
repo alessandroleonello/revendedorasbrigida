@@ -1858,7 +1858,10 @@ async function updateDashboard() {
 
         const sales = [];
         salesSnapshot.forEach((child) => {
-            sales.push(child.val());
+            const sale = child.val();
+            if (!sale.isSettled) {
+                sales.push(sale);
+            }
         });
 
         const goals = goalsSnapshot.val() || {};
@@ -1945,6 +1948,9 @@ async function openSettlementModal() {
         const totalSales = sales.reduce((sum, sale) => sum + sale.price, 0);
         const totalCommission = calculateTotalCommission(totalSales, goals.commissionTiers || []);
         const totalDue = totalSales - totalCommission;
+        
+        const goalAmount = goals.goalAmount || 0;
+        const goalProgress = goalAmount > 0 ? (totalCommission / goalAmount) * 100 : 0;
 
         // Calcular itens para devolução (Total recebido - Total vendido)
         let totalItemsReceived = 0;
@@ -1991,7 +1997,7 @@ async function openSettlementModal() {
 
                             <p style="font-size: 0.9em; color: #666; margin-bottom: 15px;">Ao confirmar, este relatório será enviado ao administrador para conferência e finalização.</p>
                             
-                            <button class="btn-primary" onclick="confirmSettlementRequest(${totalSales}, ${totalCommission}, ${itemsToReturn})" style="width: 100%;">Confirmar e Enviar</button>
+                            <button class="btn-primary" onclick="confirmSettlementRequest(${totalSales}, ${totalCommission}, ${itemsToReturn}, ${goalAmount}, ${goalProgress.toFixed(2)})" style="width: 100%;">Confirmar e Enviar</button>
                         </div>
                     </div>
                 </div>
@@ -2008,22 +2014,43 @@ async function openSettlementModal() {
     }
 }
 
-async function confirmSettlementRequest(totalSold, totalCommission, returnedCount) {
+async function confirmSettlementRequest(totalSold, totalCommission, returnedCount, goalAmount, goalProgress) {
     showLoading();
     try {
-        await settlementsRef.push({
+        // 1. Criar registro de acerto com histórico
+        const settlementRef = await settlementsRef.push({
             resellerId: currentUser.uid,
             resellerName: currentUser.name,
             totalSold,
             totalCommission,
             returnedCount,
+            goalAmount: parseFloat(goalAmount),
+            goalAchievement: parseFloat(goalProgress),
             status: 'pending',
             createdAt: firebase.database.ServerValue.TIMESTAMP
         });
 
+        // 2. Marcar vendas atuais como "acertadas" (zerar vendas)
+        const salesSnapshot = await salesRef.orderByChild('resellerId').equalTo(currentUser.uid).once('value');
+        const updates = {};
+        salesSnapshot.forEach(child => {
+            const sale = child.val();
+            if (!sale.isSettled) {
+                updates[`sales/${child.key}/isSettled`] = true;
+                updates[`sales/${child.key}/settlementId`] = settlementRef.key;
+            }
+        });
+
+        // 3. Zerar metas
+        updates[`goals/${currentUser.uid}/goalAmount`] = 0;
+        updates[`goals/${currentUser.uid}/settlementDate`] = '';
+
+        await database.ref().update(updates);
+
         document.getElementById('settlementModal').classList.remove('active');
         hideLoading();
-        showNotification('Solicitação de acerto enviada com sucesso!');
+        showNotification('Solicitação de acerto enviada! Vendas e metas foram reiniciadas.');
+        updateDashboard();
     } catch (error) {
         hideLoading();
         console.error('Erro ao enviar solicitação:', error);
@@ -2076,6 +2103,8 @@ async function openSettlementHistoryModal() {
                     <div style="font-size: 0.9em; color: #555; display: grid; grid-template-columns: 1fr 1fr; gap: 5px;">
                         <div>Vendido: <strong style="color: #333;">${formatCurrency(s.totalSold)}</strong></div>
                         <div>Comissão: <strong style="color: #333;">${formatCurrency(s.totalCommission)}</strong></div>
+                        <div>Meta: <strong style="color: #333;">${formatCurrency(s.goalAmount || 0)}</strong></div>
+                        <div>Atingido: <strong style="color: ${s.goalAchievement >= 100 ? '#28a745' : '#333'};">${(s.goalAchievement || 0).toFixed(1)}%</strong></div>
                         <div style="grid-column: 1 / -1; margin-top: 5px; color: #dc3545;">Devolvidos: <strong>${s.returnedCount} itens</strong></div>
                     </div>
                 </div>
@@ -2453,10 +2482,13 @@ async function loadSoldProducts() {
         const sales = [];
         
         snapshot.forEach((child) => {
-            sales.push({
-                id: child.key,
-                ...child.val()
-            });
+            const sale = child.val();
+            if (!sale.isSettled) {
+                sales.push({
+                    id: child.key,
+                    ...sale
+                });
+            }
         });
 
         const container = document.getElementById('soldProductsList');
@@ -2809,10 +2841,13 @@ async function loadPayments() {
 
         const sales = [];
         salesSnapshot.forEach((child) => {
-            sales.push({
-                id: child.key,
-                ...child.val()
-            });
+            const sale = child.val();
+            if (!sale.isSettled) {
+                sales.push({
+                    id: child.key,
+                    ...sale
+                });
+            }
         });
 
         const payments = {};
