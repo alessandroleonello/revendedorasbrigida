@@ -834,9 +834,14 @@ async function showImportModal() {
             container.style.marginBottom = '15px';
             container.innerHTML = `
                 <label style="display:block; margin-bottom:5px; font-weight:500;">Gerar Pedido para Revendedora (Opcional):</label>
-                <select id="importResellerSelect" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:4px;">
+                <select id="importResellerSelect" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:4px; margin-bottom: 10px;" onchange="document.getElementById('importSettlementDateDiv').style.display = this.value ? 'block' : 'none'">
                     <option value="">Apenas Importar para Estoque</option>
                 </select>
+                
+                <div id="importSettlementDateDiv" style="display: none;">
+                    <label style="display:block; margin-bottom:5px; font-weight:500;">Definir Data do Acerto:</label>
+                    <input type="date" id="importSettlementDate" class="input-field">
+                </div>
             `;
             fileInput.parentNode.insertBefore(container, fileInput);
         }
@@ -864,6 +869,14 @@ async function showImportModal() {
 function closeImportModal() {
     document.getElementById('importModal').classList.remove('active');
     document.getElementById('importFile').value = '';
+    const dateInput = document.getElementById('importSettlementDate');
+    if (dateInput) dateInput.value = '';
+    const select = document.getElementById('importResellerSelect');
+    if (select) {
+        select.value = '';
+        const dateDiv = document.getElementById('importSettlementDateDiv');
+        if (dateDiv) dateDiv.style.display = 'none';
+    }
 }
 
 async function importProducts() {
@@ -871,6 +884,8 @@ async function importProducts() {
     const file = fileInput.files[0];
     const resellerSelect = document.getElementById('importResellerSelect');
     const resellerId = resellerSelect ? resellerSelect.value : '';
+    const settlementDateInput = document.getElementById('importSettlementDate');
+    const settlementDate = settlementDateInput ? settlementDateInput.value : '';
 
     if (!file) {
         showNotification('Por favor, selecione um arquivo', 'error');
@@ -928,7 +943,13 @@ async function importProducts() {
                     createdAt: firebase.database.ServerValue.TIMESTAMP,
                     status: 'active'
                 });
-                showNotification(`${importCount} produtos importados e pedido gerado com sucesso!`);
+
+                // Atualizar data de acerto se fornecida
+                if (settlementDate) {
+                    await goalsRef.child(resellerId).update({ settlementDate });
+                }
+
+                showNotification(`${importCount} produtos importados, pedido gerado e data de acerto atualizada!`);
                 loadOrders();
             } else {
                 showNotification(`${importCount} produtos importados com sucesso!`);
@@ -1274,19 +1295,65 @@ async function openEditResellerModal(resellerId) {
     showLoading();
     currentEditingResellerId = resellerId;
 
+    // Remover modal estático ou antigo se existir para garantir que temos os campos novos
+    const existingModal = document.getElementById('editResellerModal');
+    if (existingModal && !document.getElementById('editResellerSettlementDate')) {
+        existingModal.remove();
+    }
+
+    if (!document.getElementById('editResellerModal')) {
+        const modalHtml = `
+            <div id="editResellerModal" class="modal-overlay">
+                <div class="modal-content" style="max-width: 500px;">
+                    <div class="modal-header">
+                        <h3>Editar Revendedora</h3>
+                        <button class="close-modal" onclick="closeEditResellerModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group">
+                            <label>Nome</label>
+                            <input type="text" id="editResellerName" class="input-field">
+                        </div>
+                        <div class="form-group">
+                            <label>E-mail</label>
+                            <input type="email" id="editResellerEmail" class="input-field">
+                        </div>
+                        <div class="form-group">
+                            <label>Telefone</label>
+                            <input type="tel" id="editResellerPhone" class="input-field">
+                        </div>
+                        <div class="form-group">
+                            <label>Data do Acerto</label>
+                            <input type="date" id="editResellerSettlementDate" class="input-field">
+                        </div>
+                        <button class="btn-primary" onclick="saveResellerEdit()" style="width: 100%; margin-top: 15px;">Salvar Alterações</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+
     try {
-        const snapshot = await usersRef.child(resellerId).once('value');
-        const reseller = snapshot.val();
+        const [userSnapshot, goalSnapshot] = await Promise.all([
+            usersRef.child(resellerId).once('value'),
+            goalsRef.child(resellerId).once('value')
+        ]);
+        
+        const reseller = userSnapshot.val();
+        const goal = goalSnapshot.val() || {};
 
         document.getElementById('editResellerName').value = reseller.name;
         document.getElementById('editResellerEmail').value = reseller.email;
         document.getElementById('editResellerPhone').value = reseller.phone;
+        document.getElementById('editResellerSettlementDate').value = goal.settlementDate || '';
 
         document.getElementById('editResellerModal').classList.add('active');
         hideLoading();
     } catch (error) {
         hideLoading();
         console.error('Erro ao abrir edição de revendedora:', error);
+        showNotification('Erro ao carregar dados', 'error');
     }
 }
 
@@ -1301,10 +1368,18 @@ async function saveResellerEdit() {
         email: document.getElementById('editResellerEmail').value.trim(),
         phone: document.getElementById('editResellerPhone').value.trim()
     };
+    
+    const settlementDate = document.getElementById('editResellerSettlementDate').value;
 
     showLoading();
     try {
         await usersRef.child(currentEditingResellerId).update(updates);
+        
+        // Atualizar data de acerto
+        if (settlementDate) {
+            await goalsRef.child(currentEditingResellerId).update({ settlementDate });
+        }
+
         closeEditResellerModal();
         hideLoading();
         showNotification('Revendedora atualizada com sucesso!');
@@ -2317,6 +2392,12 @@ async function openEditOrderModal(orderId) {
     showLoading();
     currentEditingOrderId = orderId;
 
+    // FORÇAR ATUALIZAÇÃO: Se o modal já existe mas não tem o campo de data, remove para recriar
+    const existingModal = document.getElementById('editOrderModal');
+    if (existingModal && !document.getElementById('editOrderSettlementDate')) {
+        existingModal.remove();
+    }
+
     // Injetar modal se não existir
     if (!document.getElementById('editOrderModal')) {
         const modalHtml = `
@@ -2330,6 +2411,11 @@ async function openEditOrderModal(orderId) {
                         <div class="form-group">
                             <label>Revendedora</label>
                             <select id="editOrderReseller" class="input-field"></select>
+                        </div>
+
+                        <div class="form-group">
+                            <label>Data do Acerto</label>
+                            <input type="date" id="editOrderSettlementDate" class="input-field">
                         </div>
                         
                         <div id="editOrderProductsSelection" style="margin-top: 20px;">
@@ -2354,6 +2440,13 @@ async function openEditOrderModal(orderId) {
         ]);
 
         const order = orderSnapshot.val();
+        
+        // Buscar data de acerto atual da revendedora
+        const goalSnapshot = await goalsRef.child(order.resellerId).once('value');
+        const goal = goalSnapshot.val() || {};
+        const dateInput = document.getElementById('editOrderSettlementDate');
+        if (dateInput) dateInput.value = goal.settlementDate || '';
+
         const resellers = [];
         usersSnapshot.forEach(child => resellers.push({id: child.key, ...child.val()}));
         
@@ -2442,6 +2535,8 @@ function closeEditOrderModal() {
 
 async function saveOrderEdit() {
     const resellerId = document.getElementById('editOrderReseller').value;
+    const settlementDateInput = document.getElementById('editOrderSettlementDate');
+    const settlementDate = settlementDateInput ? settlementDateInput.value : '';
     
     if (!resellerId) {
         showNotification('Selecione uma revendedora', 'error');
@@ -2501,6 +2596,11 @@ async function saveOrderEdit() {
             resellerId,
             products: productIds
         });
+
+        // Atualizar data de acerto se fornecida
+        if (settlementDate) {
+            await goalsRef.child(resellerId).update({ settlementDate });
+        }
 
         closeEditOrderModal();
         hideLoading();
