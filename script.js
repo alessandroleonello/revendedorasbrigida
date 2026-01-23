@@ -535,7 +535,7 @@ async function loadPendingSettlements() {
                             <div>Comissão: <strong>${formatCurrency(s.totalCommission)}</strong></div>
                             <div style="color: #dc3545;">Devolução: <strong>${s.returnedCount} itens</strong></div>
                         </div>
-                        <button class="btn-primary" onclick="finalizeSettlement('${s.id}')" style="background-color: #28a745;">✅ Finalizar Acerto</button>
+                        <button class="btn-primary" onclick="openFinalizeSettlementModal('${s.id}')" style="background-color: #28a745;">✅ Finalizar Acerto</button>
                     </div>
                 `).join('')}
             </div>
@@ -545,21 +545,74 @@ async function loadPendingSettlements() {
     }
 }
 
-async function finalizeSettlement(settlementId) {
-    if (!confirm('Confirma o recebimento das devoluções e finalização deste acerto?')) return;
+let currentFinalizingSettlementId = null;
+
+function openFinalizeSettlementModal(settlementId) {
+    currentFinalizingSettlementId = settlementId;
+    
+    if (!document.getElementById('finalizeSettlementModal')) {
+        const modalHtml = `
+            <div id="finalizeSettlementModal" class="modal-overlay">
+                <div class="modal-content" style="max-width: 400px;">
+                    <div class="modal-header">
+                        <h3>Finalizar Acerto</h3>
+                        <button class="close-modal" onclick="closeFinalizeSettlementModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p style="margin-bottom: 15px; color: #666;">Confirme a data de finalização deste acerto:</p>
+                        <div class="form-group">
+                            <label>Data do Acerto</label>
+                            <input type="date" id="finalizeSettlementDate" class="input-field">
+                        </div>
+                        <button class="btn-primary" onclick="confirmFinalizeSettlement()" style="width: 100%;">Confirmar Finalização</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+
+    // Definir hoje como padrão
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    document.getElementById('finalizeSettlementDate').value = `${yyyy}-${mm}-${dd}`;
+
+    document.getElementById('finalizeSettlementModal').classList.add('active');
+}
+
+function closeFinalizeSettlementModal() {
+    document.getElementById('finalizeSettlementModal').classList.remove('active');
+    currentFinalizingSettlementId = null;
+}
+
+async function confirmFinalizeSettlement() {
+    const dateStr = document.getElementById('finalizeSettlementDate').value;
+    if (!dateStr) {
+        showNotification('Selecione uma data', 'error');
+        return;
+    }
+
+    if (!currentFinalizingSettlementId) return;
+
+    // Criar timestamp da data local (00:00:00)
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const dateObj = new Date(year, month - 1, day);
+    const timestamp = dateObj.getTime();
 
     showLoading();
     try {
         // 1. Buscar dados do acerto para registrar o pagamento
-        const snapshot = await settlementsRef.child(settlementId).once('value');
+        const snapshot = await settlementsRef.child(currentFinalizingSettlementId).once('value');
         const settlement = snapshot.val();
 
         if (!settlement) throw new Error('Acerto não encontrado');
 
         // 2. Atualizar status
-        await settlementsRef.child(settlementId).update({
+        await settlementsRef.child(currentFinalizingSettlementId).update({
             status: 'completed',
-            finalizedAt: firebase.database.ServerValue.TIMESTAMP
+            finalizedAt: timestamp
         });
         
         // 3. Criar registro na tabela de vendas (Valor que a revendedora paga)
@@ -574,7 +627,7 @@ async function finalizeSettlement(settlementId) {
                 price: amountDue,
                 clientId: 'ADMIN',
                 clientName: 'Acerto de Contas',
-                date: firebase.database.ServerValue.TIMESTAMP,
+                date: timestamp,
                 paymentStatus: 'paid',
                 category: 'Financeiro'
             });
@@ -582,6 +635,7 @@ async function finalizeSettlement(settlementId) {
 
         hideLoading();
         showNotification('Acerto finalizado e valor registrado nas vendas!');
+        closeFinalizeSettlementModal();
         loadPendingSettlements();
         
         // Atualizar dashboard se estiver na tela para refletir o novo valor
@@ -1406,9 +1460,12 @@ async function saveResellerEdit() {
 }
 
 let currentResellerSalesData = [];
+let currentResellerPaymentsData = {};
+let currentAdminViewResellerId = null;
 
 async function viewResellerSales(resellerId) {
     showLoading();
+    currentAdminViewResellerId = resellerId;
     
     const filterInput = document.getElementById('resellerMonthFilter');
     let filterValue = filterInput ? filterInput.value : '';
@@ -1421,12 +1478,24 @@ async function viewResellerSales(resellerId) {
     }
 
     try {
-        const snapshot = await salesRef.orderByChild('resellerId').equalTo(resellerId).once('value');
+        const [salesSnapshot, paymentsSnapshot] = await Promise.all([
+            salesRef.orderByChild('resellerId').equalTo(resellerId).once('value'),
+            paymentsRef.once('value')
+        ]);
+
         const sales = [];
         
-        snapshot.forEach((child) => {
+        salesSnapshot.forEach((child) => {
             sales.push({ id: child.key, ...child.val() });
         });
+
+        const payments = {};
+        paymentsSnapshot.forEach((child) => {
+            const p = child.val();
+            const key = p.groupId || p.saleId;
+            payments[key] = { id: child.key, ...p };
+        });
+        currentResellerPaymentsData = payments;
 
         const [filterYear, filterMonth] = filterValue.split('-').map(Number);
         const filteredSales = sales.filter(sale => {
@@ -1485,6 +1554,8 @@ function filterResellerSalesList() {
         // Usar [...displaySales] para criar uma cópia antes de inverter, evitando mutação
         container.innerHTML = [...displaySales].reverse().map(sale => {
             const isSettlement = sale.productId === 'ACERTO';
+            const payment = currentResellerPaymentsData[sale.groupId || sale.id];
+
             return `
             <div class="sale-item" style="background: ${isSettlement ? '#e8f5e9' : '#f9f9f9'}; padding: 10px; margin-bottom: 10px; border-radius: 4px; border: 1px solid ${isSettlement ? '#c3e6cb' : '#eee'};">
                 <div class="sale-header" style="display: flex; justify-content: space-between; font-weight: 600;">
@@ -1495,10 +1566,12 @@ function filterResellerSalesList() {
                     ${isSettlement ? '<strong>Tipo: Pagamento de Acerto</strong>' : `Cliente: ${sale.clientName}`} <br>
                     Data: ${formatDate(sale.date)} <br>
                     Status: ${sale.paymentStatus === 'paid' ? 'Pago' : sale.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'}
+                    ${payment ? `<br><span style="font-size: 0.9em; color: #28a745;">Pagamento: ${payment.method} ${payment.installments ? `(${payment.installments}x)` : ''}</span>` : ''}
                 </div>
                 <div style="text-align: right; margin-top: 8px; padding-top: 8px; border-top: 1px solid #eee;">
-                    <button class="btn-secondary" onclick="openAdminEditSaleModal('${sale.id}', '${sale.resellerId}')" style="padding: 4px 10px; font-size: 0.8em; width: auto; margin: 0; margin-right: 5px;">Editar</button>
-                    <button class="btn-delete" onclick="deleteAdminSale('${sale.id}', '${sale.resellerId}')" style="padding: 4px 10px; font-size: 0.8em; width: auto; margin: 0;">Excluir</button>
+                    ${payment ? `<button class="btn-secondary" onclick="openEditPaymentModal('${payment.id}', '${sale.id}')" style="padding: 4px 10px; font-size: 0.8em; width: auto; margin: 0; margin-right: 5px; background-color: #4a90e2; color: white; border: none;">Editar Pagamento</button>` : ''}
+                    <button class="btn-secondary" onclick="openAdminEditSaleModal('${sale.id}', '${sale.resellerId}')" style="padding: 4px 10px; font-size: 0.8em; width: auto; margin: 0; margin-right: 5px;">Editar Venda</button>
+                    <button class="btn-delete" onclick="deleteAdminSale('${sale.id}', '${sale.resellerId}')" style="padding: 4px 10px; font-size: 0.8em; width: auto; margin: 0;">Excluir Venda</button>
                 </div>
             </div>
         `}).join('');
@@ -1544,33 +1617,189 @@ async function openAdminEditSaleModal(saleId, resellerId) {
     currentEditingSaleId = saleId;
     currentAdminEditingResellerId = resellerId;
 
+    // Injetar Modal de Edição Admin se não existir
+    if (!document.getElementById('adminEditSaleModal')) {
+        const modalHtml = `
+            <div id="adminEditSaleModal" class="modal-overlay">
+                <div class="modal-content" style="max-width: 500px;">
+                    <div class="modal-header">
+                        <h3>Editar Venda (Admin)</h3>
+                        <button class="close-modal" onclick="closeAdminEditSaleModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group">
+                            <label>Data da Venda</label>
+                            <input type="date" id="adminEditSaleDate" class="input-field">
+                        </div>
+                        <div class="form-group">
+                            <label>Produto / Descrição</label>
+                            <input type="text" id="adminEditSaleProduct" class="input-field">
+                        </div>
+                        <div class="form-group">
+                            <label>Valor (R$)</label>
+                            <input type="number" id="adminEditSalePrice" class="input-field" step="0.01">
+                        </div>
+                        <div class="form-group">
+                            <label>Cliente</label>
+                            <select id="adminEditSaleClient" class="input-field"></select>
+                        </div>
+                        <div class="form-group">
+                            <label>Status do Pagamento</label>
+                            <select id="adminEditSaleStatus" class="input-field">
+                                <option value="pending">Pendente</option>
+                                <option value="paid">Pago</option>
+                                <option value="installment">Parcelado</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Método de Pagamento (Informativo)</label>
+                            <select id="adminEditSaleMethod" class="input-field">
+                                <option value="">Não especificado</option>
+                                <option value="money">Dinheiro</option>
+                                <option value="pix">PIX</option>
+                                <option value="credit">Cartão de Crédito</option>
+                                <option value="debit">Cartão de Débito</option>
+                                <option value="transfer">Transferência</option>
+                            </select>
+                            <p style="font-size: 0.8em; color: #666; margin-top: 5px;">*Para gerenciar parcelas detalhadas, use o botão "Editar Pagamento" na lista.</p>
+                        </div>
+                        <button class="btn-primary" onclick="saveAdminSaleEdit()" style="width: 100%; margin-top: 15px;">Salvar Alterações</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+
     try {
-        const [saleSnapshot, clientsSnapshot] = await Promise.all([
+        const [saleSnapshot, clientsSnapshot, paymentsSnapshot] = await Promise.all([
             salesRef.child(saleId).once('value'),
-            clientsRef.orderByChild('resellerId').equalTo(resellerId).once('value')
+            clientsRef.orderByChild('resellerId').equalTo(resellerId).once('value'),
+            paymentsRef.orderByChild('saleId').equalTo(saleId).once('value')
         ]);
 
         const sale = saleSnapshot.val();
+        if (!sale) throw new Error('Venda não encontrada');
+
         const clients = [];
         clientsSnapshot.forEach(child => {
             clients.push({ id: child.key, ...child.val() });
         });
 
-        document.getElementById('editSaleInfo').innerHTML = `
-            <p><strong>Produto:</strong> ${sale.productName}</p>
-            <p><strong>Valor:</strong> ${formatCurrency(sale.price)}</p>
-        `;
+        // Preencher Campos
+        const dateObj = new Date(sale.date);
+        const yyyy = dateObj.getFullYear();
+        const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+        const dd = String(dateObj.getDate()).padStart(2, '0');
+        document.getElementById('adminEditSaleDate').value = `${yyyy}-${mm}-${dd}`;
 
-        const select = document.getElementById('editSaleClient');
-        select.innerHTML = '<option value="">Selecione o Cliente</option>' +
-            clients.map(c => `<option value="${c.id}" ${c.id === sale.clientId ? 'selected' : ''}>${c.name}</option>`).join('');
+        document.getElementById('adminEditSaleProduct').value = sale.productName;
+        document.getElementById('adminEditSalePrice').value = sale.price;
+        document.getElementById('adminEditSaleStatus').value = sale.paymentStatus;
 
-        document.getElementById('editSaleModal').classList.add('active');
+        // Preencher Clientes
+        const select = document.getElementById('adminEditSaleClient');
+        let clientOptions = '<option value="">Selecione o Cliente</option>';
+        if (sale.productId === 'ACERTO') {
+             clientOptions += `<option value="ADMIN">Acerto de Contas (Admin)</option>`;
+        }
+        clients.forEach(c => {
+            clientOptions += `<option value="${c.id}">${c.name}</option>`;
+        });
+        select.innerHTML = clientOptions;
+        select.value = sale.clientId || "";
+
+        // Preencher Método de Pagamento (se existir registro de pagamento)
+        let paymentMethod = "";
+        let paymentId = null;
+        paymentsSnapshot.forEach(child => {
+            paymentMethod = child.val().method;
+            paymentId = child.key;
+        });
+        const methodSelect = document.getElementById('adminEditSaleMethod');
+        methodSelect.value = paymentMethod || "";
+        methodSelect.dataset.paymentId = paymentId || "";
+
+        document.getElementById('adminEditSaleModal').classList.add('active');
         hideLoading();
     } catch (error) {
         hideLoading();
         console.error('Erro ao abrir edição:', error);
-        showNotification('Erro ao abrir edição', 'error');
+        showNotification('Erro ao abrir edição: ' + error.message, 'error');
+    }
+}
+
+function closeAdminEditSaleModal() {
+    document.getElementById('adminEditSaleModal').classList.remove('active');
+    currentEditingSaleId = null;
+    currentAdminEditingResellerId = null;
+}
+
+async function saveAdminSaleEdit() {
+    const dateStr = document.getElementById('adminEditSaleDate').value;
+    const productName = document.getElementById('adminEditSaleProduct').value.trim();
+    const price = parseFloat(document.getElementById('adminEditSalePrice').value);
+    const clientId = document.getElementById('adminEditSaleClient').value;
+    const paymentStatus = document.getElementById('adminEditSaleStatus').value;
+    const paymentMethod = document.getElementById('adminEditSaleMethod').value;
+    const paymentId = document.getElementById('adminEditSaleMethod').dataset.paymentId;
+
+    if (!dateStr || !productName || isNaN(price)) {
+        showNotification('Preencha os campos obrigatórios (Data, Produto, Valor)', 'error');
+        return;
+    }
+
+    // Converter data para timestamp (00:00 local)
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const timestamp = new Date(year, month - 1, day).getTime();
+
+    // Obter nome do cliente
+    const select = document.getElementById('adminEditSaleClient');
+    const clientName = select.options[select.selectedIndex] ? select.options[select.selectedIndex].text : 'Cliente Desconhecido';
+
+    showLoading();
+    try {
+        // 1. Atualizar Venda
+        const updates = {
+            date: timestamp,
+            productName: productName,
+            price: price,
+            clientId: clientId,
+            clientName: clientName,
+            paymentStatus: paymentStatus
+        };
+        await salesRef.child(currentEditingSaleId).update(updates);
+
+        // 2. Atualizar ou Criar Pagamento (se método foi selecionado)
+        if (paymentMethod) {
+            if (paymentId) {
+                // Atualizar existente
+                await paymentsRef.child(paymentId).update({ method: paymentMethod });
+            } else {
+                // Criar novo pagamento simples
+                const newPaymentId = generateId();
+                await paymentsRef.child(newPaymentId).set({
+                    saleId: currentEditingSaleId,
+                    method: paymentMethod,
+                    date: timestamp,
+                    installments: null,
+                    installmentValue: null
+                });
+            }
+        }
+
+        closeAdminEditSaleModal();
+        hideLoading();
+        showNotification('Venda atualizada com sucesso!');
+        
+        // Recarregar lista
+        if (currentAdminEditingResellerId) {
+            viewResellerSales(currentAdminEditingResellerId);
+        }
+    } catch (error) {
+        hideLoading();
+        console.error('Erro ao salvar edição:', error);
+        showNotification('Erro ao salvar alterações', 'error');
     }
 }
 
@@ -4892,8 +5121,15 @@ async function savePaymentEdit() {
         closeEditPaymentModal();
         hideLoading();
         showNotification('Pagamento atualizado com sucesso!');
-        loadPayments();
-        updateDashboard();
+        
+        if (currentUser && currentUser.role === 'admin') {
+            if (currentAdminViewResellerId) {
+                viewResellerSales(currentAdminViewResellerId);
+            }
+        } else {
+            loadPayments();
+            updateDashboard();
+        }
     } catch (error) {
         hideLoading();
         console.error('Erro ao atualizar pagamento:', error);
