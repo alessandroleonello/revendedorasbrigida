@@ -64,6 +64,10 @@ async function handleLogin() {
             throw new Error('Usuário não encontrado no banco de dados');
         }
 
+        if (userData.isDeleted) {
+            throw new Error('Acesso revogado');
+        }
+
         currentUser = {
             uid: user.uid,
             email: user.email,
@@ -83,7 +87,11 @@ async function handleLogin() {
     } catch (error) {
         hideLoading();
         console.error('Erro no login:', error);
-        showNotification('E-mail ou senha incorretos', 'error');
+        if (error.message === 'Acesso revogado') {
+            showNotification('Seu acesso foi revogado. Entre em contato com o administrador.', 'error');
+        } else {
+            showNotification('E-mail ou senha incorretos', 'error');
+        }
     }
 }
 
@@ -1007,6 +1015,38 @@ async function saveReseller() {
         showNotification('Revendedora cadastrada com sucesso!');
         loadResellers();
     } catch (error) {
+        // Tentar recuperação se o e-mail já existir
+        if (error.code === 'auth/email-already-in-use' && secondaryApp) {
+            try {
+                const secondaryAuth = secondaryApp.auth();
+                // Tentar logar com a senha fornecida para validar posse e recuperar UID
+                const userCredential = await secondaryAuth.signInWithEmailAndPassword(email, password);
+                const user = userCredential.user;
+
+                // Reativar/Recriar registro no banco
+                await usersRef.child(user.uid).set({
+                    name,
+                    email,
+                    phone,
+                    role: 'reseller',
+                    createdAt: firebase.database.ServerValue.TIMESTAMP,
+                    isDeleted: null // Garante que não está deletado
+                });
+
+                await secondaryAuth.signOut();
+                await secondaryApp.delete();
+                secondaryApp = null;
+
+                closeAddResellerModal();
+                hideLoading();
+                showNotification('Conta existente encontrada e reativada com sucesso!');
+                loadResellers();
+                return;
+            } catch (recError) {
+                console.error('Falha na recuperação automática:', recError);
+            }
+        }
+
         if (secondaryApp) {
             try { await secondaryApp.delete(); } catch (e) {}
         }
@@ -1015,7 +1055,7 @@ async function saveReseller() {
         console.error('Erro ao cadastrar revendedora:', error);
         
         if (error.code === 'auth/email-already-in-use') {
-            showNotification('Este e-mail já está cadastrado', 'error');
+            showNotification('Este e-mail já está em uso e a senha não confere.', 'error');
         } else {
             showNotification('Erro ao cadastrar revendedora', 'error');
         }
@@ -1038,9 +1078,10 @@ async function loadResellers() {
     }
 
     try {
-        const [resellersSnapshot, salesSnapshot] = await Promise.all([
+        const [resellersSnapshot, salesSnapshot, settlementsSnapshot] = await Promise.all([
             usersRef.orderByChild('role').equalTo('reseller').once('value'),
-            salesRef.once('value')
+            salesRef.once('value'),
+            settlementsRef.once('value')
         ]);
 
         const resellers = [];
@@ -1056,6 +1097,36 @@ async function loadResellers() {
             allSales.push(child.val());
         });
 
+        // Mapear nomes de revendedoras excluídas baseado nos acertos (se houver)
+        const deletedResellerNames = {};
+        settlementsSnapshot.forEach(child => {
+            const s = child.val();
+            if (s.resellerId && s.resellerName) {
+                deletedResellerNames[s.resellerId] = s.resellerName;
+            }
+        });
+
+        // Encontrar revendedoras que têm vendas mas não estão na lista de usuários (Excluídas)
+        const activeResellerIds = new Set(resellers.map(r => r.id));
+        const orphanedResellerIds = new Set();
+        
+        allSales.forEach(sale => {
+            if (sale.resellerId && !activeResellerIds.has(sale.resellerId)) {
+                orphanedResellerIds.add(sale.resellerId);
+            }
+        });
+
+        orphanedResellerIds.forEach(id => {
+            resellers.push({
+                id: id,
+                name: deletedResellerNames[id] || 'Revendedora Excluída',
+                email: 'Acesso Removido',
+                phone: '-',
+                createdAt: 0,
+                isDeleted: true
+            });
+        });
+
         const container = document.getElementById('resellersList');
 
         if (resellers.length === 0) {
@@ -1069,17 +1140,39 @@ async function loadResellers() {
             return;
         }
 
-        // Adicionar botão de Configuração Global no topo se não existir
-        if (!document.getElementById('btnGlobalCommissions')) {
-            const header = container.previousElementSibling || container.parentElement.querySelector('h3') || container.parentElement;
-            // Tenta inserir antes da lista ou no container pai
-            const btnDiv = document.createElement('div');
-            btnDiv.style.marginBottom = '15px';
-            btnDiv.innerHTML = `<button id="btnGlobalCommissions" class="btn-primary" onclick="openAdminCommissionModal('GLOBAL')" style="background-color: #2c1810;">⚙️ Configurar Comissões Padrão</button>`;
-            if (container.parentNode) container.parentNode.insertBefore(btnDiv, container);
+        // Injetar controles (Botão Global + Checkbox Ocultar)
+        if (!document.getElementById('resellerControls')) {
+            const controlsDiv = document.createElement('div');
+            controlsDiv.id = 'resellerControls';
+            controlsDiv.style.marginBottom = '15px';
+            controlsDiv.style.display = 'flex';
+            controlsDiv.style.gap = '15px';
+            controlsDiv.style.alignItems = 'center';
+            controlsDiv.style.flexWrap = 'wrap';
+            
+            controlsDiv.innerHTML = `
+                <button id="btnGlobalCommissions" class="btn-primary" onclick="openAdminCommissionModal('GLOBAL')" style="background-color: #2c1810; width: auto; margin: 0;">⚙️ Comissões Padrão</button>
+                <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; background: #fff; padding: 8px 12px; border-radius: 8px; border: 1px solid #ddd; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                    <input type="checkbox" id="hideDeletedResellers" onchange="loadResellers()">
+                    <span style="font-size: 0.9em; font-weight: 500; color: #555;">Ocultar Excluídas</span>
+                </label>
+            `;
+            
+            // Remover botão antigo se existir para evitar duplicidade
+            const oldBtn = document.getElementById('btnGlobalCommissions');
+            if (oldBtn && oldBtn.parentNode && oldBtn.parentNode.id !== 'resellerControls') {
+                oldBtn.parentNode.remove();
+            }
+
+            if (container.parentNode) container.parentNode.insertBefore(controlsDiv, container);
         }
 
+        const hideDeleted = document.getElementById('hideDeletedResellers') ? document.getElementById('hideDeletedResellers').checked : false;
+
         container.innerHTML = resellers.map(reseller => {
+            // Se estiver marcada para ocultar e for excluída, não renderiza
+            if (reseller.isDeleted && hideDeleted) return '';
+
             const [filterYear, filterMonth] = filterValue.split('-').map(Number);
             
             const resellerSales = allSales.filter(sale => {
@@ -1091,22 +1184,23 @@ async function loadResellers() {
             const totalSales = resellerSales.reduce((sum, sale) => sum + sale.price, 0);
 
             return `
-            <div class="reseller-item">
+            <div class="reseller-item" ${reseller.isDeleted ? 'style="background: #fff5f5; border: 1px dashed #dc3545;"' : ''}>
                 <div class="reseller-header">
-                    <div class="reseller-name">${reseller.name}</div>
+                    <div class="reseller-name">${reseller.name} ${reseller.isDeleted ? '<span style="font-size:0.7em; color:#dc3545;">(Excluída)</span>' : ''}</div>
                     <div class="reseller-total" style="font-weight: bold; color: #2c1810;">${formatCurrency(totalSales)}</div>
                 </div>
                 <div class="reseller-details">
                     <p>📧 ${reseller.email}</p>
                     <p>📱 ${reseller.phone}</p>
-                    <p>📅 Cadastrado em: ${formatDate(reseller.createdAt)}</p>
+                    <p>📅 Cadastrado em: ${reseller.createdAt ? formatDate(reseller.createdAt) : '-'}</p>
                     <p>🛍️ Vendas: ${resellerSales.length}</p>
                 </div>
                 <div class="reseller-actions">
                     <button class="btn-edit" onclick="viewResellerSales('${reseller.id}')">Ver Vendas</button>
-                    <button class="btn-secondary" onclick="openAdminCommissionModal('${reseller.id}', '${reseller.name}')" style="margin-left: 5px;">Comissões</button>
-                    <button class="btn-secondary" onclick="openEditResellerModal('${reseller.id}')" style="margin-left: 5px;">Editar</button>
-                    <button class="btn-delete" onclick="deleteReseller('${reseller.id}')" style="margin-left: 5px;">Excluir</button>
+                    ${!reseller.isDeleted ? `<button class="btn-secondary" onclick="openAdminCommissionModal('${reseller.id}', '${reseller.name}')" style="margin-left: 5px;">Comissões</button>` : ''}
+                    ${!reseller.isDeleted ? `<button class="btn-secondary" onclick="openEditResellerModal('${reseller.id}')" style="margin-left: 5px;">Editar</button>` : ''}
+                    ${!reseller.isDeleted ? `<button class="btn-delete" onclick="deleteReseller('${reseller.id}')" style="margin-left: 5px;">Excluir</button>` : ''}
+                    ${reseller.isDeleted ? `<button class="btn-secondary" onclick="restoreReseller('${reseller.id}', '${reseller.name}')" style="margin-left: 5px; background-color: #28a745; color: white; border: none;">Restaurar</button>` : ''}
                 </div>
             </div>
         `}).join('');
@@ -1120,11 +1214,14 @@ async function loadResellers() {
 }
 
 async function deleteReseller(resellerId) {
-    if (!confirm('Tem certeza que deseja excluir esta revendedora? Isso não apagará o histórico de vendas, mas removerá o acesso.')) return;
+    if (!confirm('Tem certeza que deseja excluir esta revendedora? O acesso será bloqueado, mas o histórico será mantido.')) return;
     
     showLoading();
     try {
-        await usersRef.child(resellerId).remove();
+        // Soft delete: Mantém o registro mas marca como deletado
+        await usersRef.child(resellerId).update({
+            isDeleted: true
+        });
         hideLoading();
         showNotification('Revendedora excluída com sucesso!');
         loadResellers();
@@ -1132,6 +1229,42 @@ async function deleteReseller(resellerId) {
         hideLoading();
         console.error('Erro ao excluir revendedora:', error);
         showNotification('Erro ao excluir revendedora', 'error');
+    }
+}
+
+async function restoreReseller(resellerId, currentName) {
+    if (!confirm(`Deseja restaurar o acesso da revendedora "${currentName}"?`)) return;
+
+    showLoading();
+    try {
+        // Verificar se o registro existe (Soft Delete) ou se foi removido (Hard Delete antigo)
+        const snapshot = await usersRef.child(resellerId).once('value');
+        const existing = snapshot.val();
+
+        if (existing) {
+            // Apenas remove a marcação de deletado
+            await usersRef.child(resellerId).update({ isDeleted: null });
+        } else {
+            // Modo legado: recria o registro se foi apagado fisicamente
+            const email = prompt("Por favor, confirme ou insira o e-mail para login:", "");
+            if (email === null) { hideLoading(); return; }
+
+            await usersRef.child(resellerId).set({
+                name: currentName.replace(' (Excluída)', '').replace('Revendedora Excluída', 'Revendedora Restaurada'),
+                email: email,
+                phone: '',
+                role: 'reseller',
+                createdAt: firebase.database.ServerValue.TIMESTAMP
+            });
+        }
+
+        hideLoading();
+        showNotification('Revendedora restaurada com sucesso!');
+        loadResellers();
+    } catch (error) {
+        hideLoading();
+        console.error('Erro ao restaurar:', error);
+        showNotification('Erro ao restaurar revendedora', 'error');
     }
 }
 
@@ -1203,7 +1336,7 @@ async function viewResellerSales(resellerId) {
         const sales = [];
         
         snapshot.forEach((child) => {
-            sales.push(child.val());
+            sales.push({ id: child.key, ...child.val() });
         });
 
         const [filterYear, filterMonth] = filterValue.split('-').map(Number);
@@ -1213,7 +1346,7 @@ async function viewResellerSales(resellerId) {
         });
 
         const userSnapshot = await usersRef.child(resellerId).once('value');
-        const reseller = userSnapshot.val();
+        const reseller = userSnapshot.val() || { name: 'Revendedora Excluída' };
 
         // Armazenar dados para filtragem
         currentResellerSalesData = filteredSales;
@@ -1274,6 +1407,10 @@ function filterResellerSalesList() {
                     Data: ${formatDate(sale.date)} <br>
                     Status: ${sale.paymentStatus === 'paid' ? 'Pago' : sale.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'}
                 </div>
+                <div style="text-align: right; margin-top: 8px; padding-top: 8px; border-top: 1px solid #eee;">
+                    <button class="btn-secondary" onclick="openAdminEditSaleModal('${sale.id}', '${sale.resellerId}')" style="padding: 4px 10px; font-size: 0.8em; width: auto; margin: 0; margin-right: 5px;">Editar</button>
+                    <button class="btn-delete" onclick="deleteAdminSale('${sale.id}', '${sale.resellerId}')" style="padding: 4px 10px; font-size: 0.8em; width: auto; margin: 0;">Excluir</button>
+                </div>
             </div>
         `}).join('');
     }
@@ -1283,6 +1420,69 @@ function filterResellerSalesList() {
 
 function closeResellerSalesModal() {
     document.getElementById('resellerSalesModal').classList.remove('active');
+}
+
+async function deleteAdminSale(saleId, resellerId) {
+    if (!confirm('Tem certeza que deseja excluir esta venda? Esta ação não pode ser desfeita e removerá também os registros de pagamento associados.')) return;
+
+    showLoading();
+    try {
+        // 1. Remover a venda
+        await salesRef.child(saleId).remove();
+        
+        // 2. Remover pagamentos associados
+        const paymentsSnapshot = await paymentsRef.orderByChild('saleId').equalTo(saleId).once('value');
+        const updates = {};
+        paymentsSnapshot.forEach(child => {
+            updates[child.key] = null;
+        });
+        if (Object.keys(updates).length > 0) {
+            await paymentsRef.update(updates);
+        }
+
+        hideLoading();
+        showNotification('Venda excluída com sucesso!');
+        viewResellerSales(resellerId); // Recarrega a lista para atualizar a visualização
+    } catch (error) {
+        hideLoading();
+        console.error('Erro ao excluir venda:', error);
+        showNotification('Erro ao excluir venda', 'error');
+    }
+}
+
+async function openAdminEditSaleModal(saleId, resellerId) {
+    showLoading();
+    currentEditingSaleId = saleId;
+    currentAdminEditingResellerId = resellerId;
+
+    try {
+        const [saleSnapshot, clientsSnapshot] = await Promise.all([
+            salesRef.child(saleId).once('value'),
+            clientsRef.orderByChild('resellerId').equalTo(resellerId).once('value')
+        ]);
+
+        const sale = saleSnapshot.val();
+        const clients = [];
+        clientsSnapshot.forEach(child => {
+            clients.push({ id: child.key, ...child.val() });
+        });
+
+        document.getElementById('editSaleInfo').innerHTML = `
+            <p><strong>Produto:</strong> ${sale.productName}</p>
+            <p><strong>Valor:</strong> ${formatCurrency(sale.price)}</p>
+        `;
+
+        const select = document.getElementById('editSaleClient');
+        select.innerHTML = '<option value="">Selecione o Cliente</option>' +
+            clients.map(c => `<option value="${c.id}" ${c.id === sale.clientId ? 'selected' : ''}>${c.name}</option>`).join('');
+
+        document.getElementById('editSaleModal').classList.add('active');
+        hideLoading();
+    } catch (error) {
+        hideLoading();
+        console.error('Erro ao abrir edição:', error);
+        showNotification('Erro ao abrir edição', 'error');
+    }
 }
 
 // ============================================
@@ -3248,6 +3448,7 @@ async function cancelSale(saleId) {
 }
 
 let currentEditingSaleId = null;
+let currentAdminEditingResellerId = null;
 
 async function openEditSaleModal(saleId) {
     showLoading();
@@ -3308,7 +3509,14 @@ async function saveSaleEdit() {
         closeEditSaleModal();
         hideLoading();
         showNotification('Venda atualizada com sucesso!');
-        loadSoldProducts();
+        
+        if (currentUser && currentUser.role === 'admin') {
+            if (currentAdminEditingResellerId) {
+                viewResellerSales(currentAdminEditingResellerId);
+            }
+        } else {
+            loadSoldProducts();
+        }
     } catch (error) {
         hideLoading();
         console.error('Erro ao atualizar venda:', error);
