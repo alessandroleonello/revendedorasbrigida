@@ -47,6 +47,7 @@
                 <button class="tab-btn active" onclick="switchAdminTab('products')">Produtos</button>
                 <button class="tab-btn" onclick="switchAdminTab('resellers')">Revendedoras</button>
                 <button class="tab-btn" onclick="switchAdminTab('orders')">Pedidos</button>
+                <button class="tab-btn" onclick="switchAdminTab('clients')">Clientes</button>
             </div>
 
             <!-- Dashboard Tab -->
@@ -138,6 +139,17 @@
                 </div>
 
                 <div id="ordersList"></div>
+            </div>
+
+            <!-- Clients Tab -->
+            <div id="adminClients" class="admin-tab-content">
+                <div class="section-header">
+                    <h2>Gerenciar Clientes (Geral)</h2>
+                </div>
+                <div class="search-bar">
+                    <input type="text" id="adminClientSearch" placeholder="Pesquisar cliente..." class="input-field" oninput="searchAdminClients()">
+                </div>
+                <div id="adminClientsList"></div>
             </div>
         </div>
     </div>

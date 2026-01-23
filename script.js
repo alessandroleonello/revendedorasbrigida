@@ -185,6 +185,9 @@ function switchAdminTab(tabName) {
     } else if (tabName === 'orders') {
         document.getElementById('adminOrders').classList.add('active');
         loadOrders();
+    } else if (tabName === 'clients') {
+        document.getElementById('adminClients').classList.add('active');
+        loadAdminClients();
     }
 }
 
@@ -1573,6 +1576,447 @@ async function loadOrders() {
 }
 
 // ============================================
+// ADMIN - GESTÃO DE CLIENTES
+// ============================================
+
+let adminClientsData = [];
+let adminClientsUsers = {};
+let currentAdminClientsPage = 1;
+const adminClientsPerPage = 10;
+let inactiveClientsData = [];
+
+async function loadAdminClients() {
+    showLoading();
+    try {
+        // Carregar clientes
+        const clientsSnapshot = await clientsRef.once('value');
+        const clients = [];
+        clientsSnapshot.forEach(child => {
+            const val = child.val();
+            if (!val.hiddenFromAdmin) {
+                clients.push({ id: child.key, ...val });
+            }
+        });
+
+        // Ordenar por data de criação (mais recentes primeiro)
+        clients.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+        // Tentar carregar usuários (revendedoras) para mostrar os nomes
+        let users = {};
+        try {
+            const usersSnapshot = await usersRef.once('value');
+            usersSnapshot.forEach(child => {
+                users[child.key] = child.val();
+            });
+        } catch (e) {
+            console.warn('Erro ao carregar dados das revendedoras (permissão ou conexão):', e);
+        }
+        
+        // Armazenar dados globalmente para paginação
+        adminClientsData = clients;
+        adminClientsUsers = users;
+        currentAdminClientsPage = 1;
+        
+        // Limpar busca anterior para garantir que todos apareçam
+        const searchInput = document.getElementById('adminClientSearch');
+        if (searchInput) searchInput.value = '';
+        
+        // Injetar/Atualizar filtro de revendedora
+        let resellerFilter = document.getElementById('adminClientResellerFilter');
+        if (!resellerFilter && searchInput) {
+            resellerFilter = document.createElement('select');
+            resellerFilter.id = 'adminClientResellerFilter';
+            resellerFilter.className = 'input-field';
+            resellerFilter.style.maxWidth = '200px';
+            resellerFilter.style.marginLeft = '10px';
+            resellerFilter.style.display = 'inline-block';
+            resellerFilter.style.padding = '8px';
+            resellerFilter.onchange = () => {
+                currentAdminClientsPage = 1;
+                renderAdminClientsPage();
+            };
+            if (searchInput.parentNode) {
+                searchInput.parentNode.insertBefore(resellerFilter, searchInput.nextSibling);
+            }
+        }
+
+        if (resellerFilter) {
+            const currentVal = resellerFilter.value;
+            let options = '<option value="">Todas as Revendedoras</option>';
+            const resellersList = Object.entries(users)
+                .filter(([_, u]) => u.role === 'reseller')
+                .map(([id, u]) => ({ id, name: u.name }))
+                .sort((a, b) => a.name.localeCompare(b.name));
+            
+            resellersList.forEach(r => options += `<option value="${r.id}">${r.name}</option>`);
+            resellerFilter.innerHTML = options;
+            resellerFilter.value = resellersList.some(r => r.id === currentVal) ? currentVal : "";
+        }
+
+        // Injetar botão de exportar
+        let exportBtn = document.getElementById('adminClientExportBtn');
+        if (!exportBtn && searchInput && searchInput.parentNode) {
+            exportBtn = document.createElement('button');
+            exportBtn.id = 'adminClientExportBtn';
+            exportBtn.className = 'btn-secondary';
+            exportBtn.innerHTML = '📥 Excel';
+            exportBtn.style.marginLeft = '10px';
+            exportBtn.style.padding = '8px 15px';
+            exportBtn.style.cursor = 'pointer';
+            exportBtn.onclick = exportAdminClientsToExcel;
+            
+            const refNode = resellerFilter ? resellerFilter.nextSibling : searchInput.nextSibling;
+            searchInput.parentNode.insertBefore(exportBtn, refNode);
+        }
+
+        // Injetar botão de Relatório de Inativos
+        let inactiveBtn = document.getElementById('adminClientInactiveBtn');
+        if (!inactiveBtn && searchInput && searchInput.parentNode) {
+            inactiveBtn = document.createElement('button');
+            inactiveBtn.id = 'adminClientInactiveBtn';
+            inactiveBtn.className = 'btn-secondary';
+            inactiveBtn.innerHTML = '💤 Inativos';
+            inactiveBtn.style.marginLeft = '10px';
+            inactiveBtn.style.padding = '8px 15px';
+            inactiveBtn.style.cursor = 'pointer';
+            inactiveBtn.onclick = showInactiveClientsReport;
+            
+            const refNode = exportBtn ? exportBtn.nextSibling : (resellerFilter ? resellerFilter.nextSibling : searchInput.nextSibling);
+            searchInput.parentNode.insertBefore(inactiveBtn, refNode);
+        }
+
+        renderAdminClientsPage();
+        hideLoading();
+    } catch (error) {
+        hideLoading();
+        console.error(error);
+        const container = document.getElementById('adminClientsList');
+        if (container) {
+            container.innerHTML = `<div class="empty-state"><p class="empty-text" style="color: #c05746;">Erro ao carregar clientes: ${error.message}</p></div>`;
+        }
+    }
+}
+
+function renderAdminClientsPage() {
+    const container = document.getElementById('adminClientsList');
+    if (!container) return;
+
+    const searchInput = document.getElementById('adminClientSearch');
+    const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
+
+    const resellerFilter = document.getElementById('adminClientResellerFilter');
+    const filterResellerId = resellerFilter ? resellerFilter.value : '';
+
+    // Filtrar dados
+    const filtered = adminClientsData.filter(client => {
+        const reseller = adminClientsUsers[client.resellerId] || {};
+        const text = (client.name + ' ' + (client.phone||'') + ' ' + (client.email||'') + ' ' + (reseller.name||'')).toLowerCase();
+        const matchesSearch = text.includes(searchTerm);
+        const matchesReseller = filterResellerId ? client.resellerId === filterResellerId : true;
+        return matchesSearch && matchesReseller;
+    });
+
+    if (filtered.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p class="empty-text">Nenhum cliente encontrado</p></div>';
+        return;
+    }
+
+    // Paginação
+    const totalPages = Math.ceil(filtered.length / adminClientsPerPage);
+    if (currentAdminClientsPage > totalPages) currentAdminClientsPage = totalPages || 1;
+    if (currentAdminClientsPage < 1) currentAdminClientsPage = 1;
+
+    const start = (currentAdminClientsPage - 1) * adminClientsPerPage;
+    const end = start + adminClientsPerPage;
+    const pageItems = filtered.slice(start, end);
+
+    // Renderizar Grid de Cards
+    let html = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px;">';
+    
+    html += pageItems.map(client => {
+        const reseller = adminClientsUsers[client.resellerId] || { name: 'Desconhecido' };
+        return `
+            <div style="background: white; border: 1px solid #eee; border-radius: 8px; padding: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); display: flex; flex-direction: column;">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;">
+                    <div>
+                        <div style="font-weight: bold; color: #2c1810; font-size: 1.1em;">${client.name}</div>
+                        <div style="font-size: 0.8em; color: #888;">Rev: ${reseller.name}</div>
+                    </div>
+                    <div style="background: #f8f9fa; padding: 4px 8px; border-radius: 4px; font-size: 1.2em;">👤</div>
+                </div>
+                
+                <div style="font-size: 0.9em; color: #555; margin-bottom: 15px; flex: 1;">
+                    ${client.phone ? `<div style="margin-bottom: 4px;">📱 ${client.phone}</div>` : ''}
+                    ${client.email ? `<div style="margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis;">📧 ${client.email}</div>` : ''}
+                    ${client.notes ? `<div style="font-style: italic; color: #777; font-size: 0.85em; margin-top: 5px;">📝 ${client.notes}</div>` : ''}
+                </div>
+
+                <div style="display: flex; gap: 8px; margin-top: auto; border-top: 1px solid #f0f0f0; padding-top: 10px;">
+                    <button class="btn-secondary" onclick="openEditClientModal('${client.id}')" style="flex: 1; font-size: 0.85em; padding: 6px;">Editar</button>
+                    <button class="btn-secondary" onclick="viewAdminClientHistory('${client.id}', '${client.resellerId}')" style="flex: 1; font-size: 0.85em; padding: 6px;">Histórico</button>
+                    <button class="btn-secondary" onclick="hideClientFromAdmin('${client.id}')" style="flex: 1; font-size: 0.85em; padding: 6px; background-color: #dc3545; color: white; border: none;">Excluir</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+    
+    html += '</div>';
+
+    // Controles de Paginação
+    if (totalPages > 1) {
+        html += `
+            <div style="display: flex; justify-content: center; align-items: center; gap: 15px; margin-top: 25px; padding-top: 15px; border-top: 1px solid #eee;">
+                <button onclick="changeAdminClientPage(-1)" class="btn-secondary" ${currentAdminClientsPage === 1 ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''}>❮ Anterior</button>
+                <span style="font-weight: 500; color: #555;">Página ${currentAdminClientsPage} de ${totalPages}</span>
+                <button onclick="changeAdminClientPage(1)" class="btn-secondary" ${currentAdminClientsPage === totalPages ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''}>Próxima ❯</button>
+            </div>
+        `;
+    }
+
+    container.innerHTML = html;
+}
+
+function changeAdminClientPage(delta) {
+    currentAdminClientsPage += delta;
+    renderAdminClientsPage();
+}
+
+function searchAdminClients() {
+    currentAdminClientsPage = 1;
+    renderAdminClientsPage();
+}
+
+async function viewAdminClientHistory(clientId, resellerId) {
+    showLoading();
+    try {
+        const clientSnapshot = await clientsRef.child(clientId).once('value');
+        const client = clientSnapshot.val();
+        
+        document.getElementById('historyClientName').textContent = `Histórico: ${client.name}`;
+
+        // Buscar vendas da revendedora específica para otimizar, depois filtrar pelo cliente
+        const salesSnapshot = await salesRef.orderByChild('resellerId').equalTo(resellerId).once('value');
+        const clientSales = [];
+        
+        salesSnapshot.forEach(child => {
+            const sale = child.val();
+            if (sale.clientId === clientId) {
+                clientSales.push(sale);
+            }
+        });
+
+        const container = document.getElementById('clientHistoryList');
+        
+        if (clientSales.length === 0) {
+            container.innerHTML = '<p style="text-align: center; color: #666;">Nenhuma compra realizada por este cliente.</p>';
+        } else {
+            container.innerHTML = clientSales.reverse().map(sale => `
+                <div class="sale-item" style="background: #f9f9f9; padding: 10px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #eee;">
+                    <div class="sale-header" style="display: flex; justify-content: space-between; font-weight: 600;">
+                        <span>${sale.productName}</span>
+                        <span>${formatCurrency(sale.price)}</span>
+                    </div>
+                    <div class="sale-details" style="font-size: 0.9em; color: #666; margin-top: 5px;">
+                        Data: ${formatDate(sale.date)} <br>
+                        Status: ${sale.paymentStatus === 'paid' ? 'Pago' : sale.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        document.getElementById('clientHistoryModal').classList.add('active');
+        hideLoading();
+    } catch (error) {
+        hideLoading();
+        console.error('Erro ao carregar histórico:', error);
+        showNotification('Erro ao carregar histórico', 'error');
+    }
+}
+
+async function hideClientFromAdmin(clientId) {
+    if (!confirm('Tem certeza que deseja remover este cliente da visualização do administrador? Ele continuará visível para a revendedora.')) return;
+
+    showLoading();
+    try {
+        await clientsRef.child(clientId).update({ hiddenFromAdmin: true });
+        hideLoading();
+        showNotification('Cliente removido da lista administrativa.');
+        loadAdminClients();
+    } catch (error) {
+        hideLoading();
+        console.error(error);
+        showNotification('Erro ao remover cliente', 'error');
+    }
+}
+
+function exportAdminClientsToExcel() {
+    const searchInput = document.getElementById('adminClientSearch');
+    const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
+
+    const resellerFilter = document.getElementById('adminClientResellerFilter');
+    const filterResellerId = resellerFilter ? resellerFilter.value : '';
+
+    // Filtrar dados (mesma lógica da renderização)
+    const filtered = adminClientsData.filter(client => {
+        const reseller = adminClientsUsers[client.resellerId] || {};
+        const text = (client.name + ' ' + (client.phone||'') + ' ' + (client.email||'') + ' ' + (reseller.name||'')).toLowerCase();
+        const matchesSearch = text.includes(searchTerm);
+        const matchesReseller = filterResellerId ? client.resellerId === filterResellerId : true;
+        return matchesSearch && matchesReseller;
+    });
+
+    if (filtered.length === 0) {
+        showNotification('Nenhum cliente encontrado para exportar', 'error');
+        return;
+    }
+
+    const data = filtered.map(client => {
+        const reseller = adminClientsUsers[client.resellerId] || { name: 'Desconhecido' };
+        return {
+            'Nome': client.name,
+            'Telefone': client.phone || '',
+            'E-mail': client.email || '',
+            'Revendedora': reseller.name,
+            'Observações': client.notes || '',
+            'Data Cadastro': formatDate(client.createdAt)
+        };
+    });
+
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Clientes");
+    XLSX.writeFile(wb, "clientes_filtrados.xlsx");
+}
+
+async function showInactiveClientsReport() {
+    showLoading();
+    try {
+        const [clientsSnapshot, salesSnapshot, usersSnapshot] = await Promise.all([
+            clientsRef.once('value'),
+            salesRef.once('value'),
+            usersRef.once('value')
+        ]);
+
+        const clients = [];
+        clientsSnapshot.forEach(child => {
+            const val = child.val();
+            if (!val.hiddenFromAdmin) {
+                clients.push({ id: child.key, ...val });
+            }
+        });
+
+        const sales = [];
+        salesSnapshot.forEach(child => sales.push(child.val()));
+
+        const users = {};
+        usersSnapshot.forEach(child => users[child.key] = child.val());
+
+        // Calcular última compra de cada cliente
+        const clientLastPurchase = {};
+        sales.forEach(sale => {
+            if (sale.clientId) {
+                const saleDate = new Date(sale.date).getTime();
+                if (!clientLastPurchase[sale.clientId] || saleDate > clientLastPurchase[sale.clientId]) {
+                    clientLastPurchase[sale.clientId] = saleDate;
+                }
+            }
+        });
+
+        const threeMonthsAgo = new Date();
+        threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+        const cutoffTime = threeMonthsAgo.getTime();
+
+        // Filtrar inativos (sem compra ou última compra > 3 meses)
+        inactiveClientsData = clients.filter(client => {
+            const lastPurchase = clientLastPurchase[client.id];
+            return !lastPurchase || lastPurchase < cutoffTime;
+        }).map(c => ({
+            ...c,
+            lastPurchase: clientLastPurchase[c.id],
+            resellerName: users[c.resellerId]?.name || 'Desconhecido'
+        }));
+
+        // Ordenar: quem nunca comprou primeiro, depois os com compra mais antiga
+        inactiveClientsData.sort((a, b) => (a.lastPurchase || 0) - (b.lastPurchase || 0));
+
+        // Renderizar Modal
+        if (!document.getElementById('inactiveClientsModal')) {
+             const modalHtml = `
+                <div id="inactiveClientsModal" class="modal-overlay">
+                    <div class="modal-content" style="max-width: 800px;">
+                        <div class="modal-header">
+                            <h3>Relatório de Clientes Inativos (+3 meses)</h3>
+                            <button class="close-modal" onclick="document.getElementById('inactiveClientsModal').classList.remove('active')">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+                                <span>Total: <strong id="inactiveCount">0</strong> clientes</span>
+                                <button class="btn-secondary" onclick="exportInactiveClientsReport()">📥 Exportar Excel</button>
+                            </div>
+                            <div id="inactiveClientsList" style="max-height: 400px; overflow-y: auto;"></div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+        }
+
+        const container = document.getElementById('inactiveClientsList');
+        document.getElementById('inactiveCount').textContent = inactiveClientsData.length;
+
+        if (inactiveClientsData.length === 0) {
+            container.innerHTML = '<div class="empty-state"><p class="empty-text">Nenhum cliente inativo encontrado.</p></div>';
+        } else {
+            container.innerHTML = inactiveClientsData.map(c => {
+                const lastPurchaseDate = c.lastPurchase ? formatDate(c.lastPurchase) : 'Nunca comprou';
+                return `
+                <div style="background: #fff; padding: 12px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <div style="font-weight: bold; color: #2c1810;">${c.name}</div>
+                        <div style="font-size: 0.85em; color: #666;">
+                            Revendedora: ${c.resellerName} | Tel: ${c.phone || '-'}
+                        </div>
+                    </div>
+                    <div style="text-align: right;">
+                        <div style="font-size: 0.85em; color: #dc3545; font-weight: 500;">Última compra:</div>
+                        <div>${lastPurchaseDate}</div>
+                    </div>
+                </div>
+            `}).join('');
+        }
+
+        document.getElementById('inactiveClientsModal').classList.add('active');
+        hideLoading();
+
+    } catch (error) {
+        hideLoading();
+        console.error('Erro ao gerar relatório:', error);
+        showNotification('Erro ao gerar relatório', 'error');
+    }
+}
+
+function exportInactiveClientsReport() {
+    if (!inactiveClientsData || inactiveClientsData.length === 0) {
+        showNotification('Nada para exportar', 'error');
+        return;
+    }
+
+    const data = inactiveClientsData.map(c => ({
+        'Nome': c.name,
+        'Telefone': c.phone || '',
+        'E-mail': c.email || '',
+        'Revendedora': c.resellerName,
+        'Última Compra': c.lastPurchase ? formatDate(c.lastPurchase) : 'Nunca',
+        'Observações': c.notes || ''
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Inativos");
+    XLSX.writeFile(wb, "clientes_inativos.xlsx");
+}
+
+// ============================================
 // NOVO PEDIDO MANUAL (MODAL)
 // ============================================
 
@@ -2497,6 +2941,9 @@ async function confirmSale() {
             await clientsRef.child(newClientId).set({
                 resellerId: currentUser.uid,
                 name: newName,
+                phone: '',
+                email: '',
+                notes: 'Cadastrado na venda rápida',
                 createdAt: firebase.database.ServerValue.TIMESTAMP
             });
             
@@ -3557,7 +4004,7 @@ async function loadClients() {
                     <span class="client-name">${client.name}</span>
                 </div>
                 <div class="client-details">
-                    📱 ${client.phone}
+                    ${client.phone ? `📱 ${client.phone}` : '<span style="color: #666; font-style: italic;">📱 Telefone não informado</span>'}
                     ${client.email ? `<br>📧 ${client.email}` : ''}
                     ${client.notes ? `<br>📝 ${client.notes}` : ''}
                 </div>
@@ -3656,7 +4103,12 @@ async function saveClientEdit() {
         closeEditClientModal();
         hideLoading();
         showNotification('Cliente atualizado com sucesso!');
-        loadClients();
+        
+        if (currentUser && currentUser.role === 'admin') {
+            loadAdminClients();
+        } else {
+            loadClients();
+        }
     } catch (error) {
         hideLoading();
         console.error('Erro ao atualizar cliente:', error);
@@ -3850,6 +4302,42 @@ async function calculateSimulation() {
 // ============================================
 
 document.addEventListener('DOMContentLoaded', function() {
+    // Injetar estilos para botões de fechar modal (maiores e vermelhos)
+    const style = document.createElement('style');
+    style.innerHTML = `
+        .close-modal {
+            font-size: 32px !important;
+            color: #dc3545 !important;
+            background: transparent !important;
+            border: none !important;
+            cursor: pointer !important;
+            padding: 0 !important;
+            font-weight: bold !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            min-width: 44px !important;
+            min-height: 44px !important;
+            line-height: 1 !important;
+        }
+    `;
+    document.head.appendChild(style);
+
+    // Fechar modal ao clicar no fundo escuro (overlay)
+    window.addEventListener('click', function(event) {
+        if (event.target.classList.contains('modal') || event.target.classList.contains('modal-overlay')) {
+            const closeBtn = event.target.querySelector('.close, .close-modal');
+            if (closeBtn) {
+                closeBtn.click();
+            } else {
+                event.target.classList.remove('active');
+                if (event.target.id === 'barcodeScannerModal' && typeof stopScanner === 'function') {
+                    stopScanner();
+                }
+            }
+        }
+    });
+
     // Event listeners
     document.getElementById('loginEmail').addEventListener('keypress', function(e) {
         if (e.key === 'Enter') handleLogin();
