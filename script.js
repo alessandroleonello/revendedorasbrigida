@@ -158,6 +158,7 @@ function switchTab(tabName) {
     if (tabName === 'sales') {
         loadProducts();
         loadSoldProducts();
+        updateCartFloatingButton();
     } else if (tabName === 'payments') {
         loadPayments();
     } else if (tabName === 'clients') {
@@ -166,6 +167,11 @@ function switchTab(tabName) {
         loadGoalsForm();
     } else if (tabName === 'dashboard') {
         updateDashboard();
+    }
+
+    if (tabName !== 'sales') {
+        const btn = document.getElementById('floatingCartBtn');
+        if (btn) btn.style.display = 'none';
     }
 }
 
@@ -3210,6 +3216,7 @@ function loadRecentSales(sales) {
 // ============================================
 
 let selectedProduct = null;
+let shoppingCart = [];
 
 async function loadProducts() {
     if (!currentUser) return;
@@ -3313,9 +3320,11 @@ async function loadProducts() {
             const quantity = parseInt(product.quantity) || 1;
             const isSold = soldCount >= quantity;
             const remaining = Math.max(0, quantity - soldCount);
+            const isInCart = shoppingCart.some(p => p.id === product.id);
 
             return `
-                <div class="product-card ${isSold ? 'sold' : ''}" onclick="${isSold ? '' : `openSaleModal('${product.id}')`}">
+                <div class="product-card ${isSold ? 'sold' : ''}" onclick="${isSold ? '' : `openSaleModal('${product.id}')`}" style="position: relative; ${isInCart ? 'border-color: #0d47a1; background-color: #f0f8ff;' : ''}">
+                    ${isInCart ? '<div style="position: absolute; top: 10px; right: 10px; background: #0d47a1; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.7em; font-weight: bold;">No Carrinho</div>' : ''}
                     <div class="product-name">${product.name}</div>
                     <div class="product-code">${product.code}</div>
                     <div class="product-price">${formatCurrency(product.price)}</div>
@@ -3376,6 +3385,34 @@ async function openSaleModal(productId) {
                 <p class="product-price">${formatCurrency(selectedProduct.price)}</p>
             </div>
         `;
+
+        // Injetar Botão de Carrinho
+        let cartBtn = document.getElementById('btnAddToCart');
+        if (!cartBtn) {
+            cartBtn = document.createElement('button');
+            cartBtn.id = 'btnAddToCart';
+            cartBtn.className = 'btn-secondary';
+            cartBtn.style.marginBottom = '15px';
+            cartBtn.style.background = '#e3f2fd';
+            cartBtn.style.color = '#0d47a1';
+            cartBtn.style.borderColor = '#0d47a1';
+            const select = document.getElementById('saleClient');
+            select.parentNode.insertBefore(cartBtn, select);
+        }
+        
+        // Injetar campos de pagamento no modal de venda
+        let paymentDiv = document.getElementById('salePaymentOptions');
+        if (!paymentDiv) {
+            paymentDiv = document.createElement('div');
+            paymentDiv.id = 'salePaymentOptions';
+            paymentDiv.style.marginTop = '15px';
+            paymentDiv.innerHTML = getPaymentFormHtml('sale');
+            document.getElementById('quickClientName').parentNode.insertBefore(paymentDiv, document.getElementById('quickClientName').nextSibling);
+        }
+
+        const isInCart = shoppingCart.some(p => p.id === selectedProduct.id);
+        cartBtn.textContent = isInCart ? '❌ Remover da Cesta' : '🛒 Adicionar à Cesta';
+        cartBtn.onclick = isInCart ? () => removeFromCart(selectedProduct.id) : () => addToCart(selectedProduct);
         
         const clients = [];
         clientsSnapshot.forEach((child) => {
@@ -3404,6 +3441,8 @@ function closeSaleModal() {
     document.getElementById('saleClient').value = '';
     document.getElementById('quickClientName').value = '';
     document.getElementById('quickClientName').style.display = 'none';
+    // Resetar campos de pagamento
+    if(document.getElementById('salePaymentMethod')) document.getElementById('salePaymentMethod').value = '';
 }
 
 async function confirmSale() {
@@ -3444,6 +3483,44 @@ async function confirmSale() {
             clientName = clientSnapshot.val().name;
         }
 
+        // Capturar dados de pagamento imediato
+        const method = document.getElementById('salePaymentMethod').value;
+        let paymentStatus = 'pending';
+        let paymentData = null;
+
+        if (method) {
+            paymentStatus = 'paid'; // Simplificação: se selecionou método, considera pago (ou parcelado)
+            const hasInstallment = document.getElementById('saleHasInstallment').checked;
+            
+            if (hasInstallment) {
+                paymentStatus = 'installment';
+            }
+
+            paymentData = {
+                method: method,
+                installments: hasInstallment ? parseInt(document.getElementById('saleInstallmentCount').value) : null,
+                installmentValue: null, // Será calculado se necessário ou null
+                date: firebase.database.ServerValue.TIMESTAMP
+            };
+
+            if (hasInstallment) {
+                const installmentsList = [];
+                const inputs = document.querySelectorAll('.sale-installment-input');
+                if (inputs.length > 0) {
+                    inputs.forEach((input, index) => {
+                        installmentsList.push({ 
+                            number: index + 1, 
+                            status: 'pending', 
+                            paidAt: null,
+                            value: parseFloat(input.value)
+                        });
+                    });
+                    paymentData.installmentsList = installmentsList;
+                    paymentData.installmentValue = installmentsList[0].value;
+                }
+            }
+        }
+
         const saleId = generateId();
         await salesRef.child(saleId).set({
             productId: selectedProduct.id,
@@ -3454,8 +3531,17 @@ async function confirmSale() {
             clientName: clientName,
             resellerId: currentUser.uid,
             date: firebase.database.ServerValue.TIMESTAMP,
-            paymentStatus: 'pending'
+            paymentStatus: paymentStatus
         });
+
+        // Se houve pagamento imediato, registrar
+        if (paymentData) {
+            const paymentId = generateId();
+            await paymentsRef.child(paymentId).set({
+                saleId: saleId,
+                ...paymentData
+            });
+        }
 
         closeSaleModal();
         hideLoading();
@@ -3466,6 +3552,278 @@ async function confirmSale() {
     } catch (error) {
         hideLoading();
         console.error('Erro ao confirmar venda:', error);
+        showNotification('Erro ao registrar venda', 'error');
+    }
+}
+
+function updateCartFloatingButton() {
+    let btn = document.getElementById('floatingCartBtn');
+    const salesTab = document.getElementById('salesTab');
+    
+    if (!btn) {
+        btn = document.createElement('button');
+        btn.id = 'floatingCartBtn';
+        btn.className = 'btn-primary';
+        btn.style.position = 'fixed';
+        btn.style.bottom = '80px';
+        btn.style.right = '20px';
+        btn.style.width = 'auto';
+        btn.style.borderRadius = '30px';
+        btn.style.padding = '12px 24px';
+        btn.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)';
+        btn.style.zIndex = '999';
+        btn.style.display = 'none';
+        btn.onclick = openCheckoutModal;
+        document.body.appendChild(btn);
+    }
+
+    if (shoppingCart.length > 0 && salesTab.classList.contains('active')) {
+        const total = shoppingCart.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+        btn.innerHTML = `🛒 Cesta (${shoppingCart.length}) | ${formatCurrency(total)}`;
+        btn.style.display = 'block';
+    } else {
+        btn.style.display = 'none';
+    }
+}
+
+function addToCart(product) {
+    if (!shoppingCart.some(p => p.id === product.id)) {
+        shoppingCart.push(product);
+        showNotification('Produto adicionado à cesta!');
+    }
+    closeSaleModal();
+    updateCartFloatingButton();
+    loadProducts();
+}
+
+function removeFromCart(productId) {
+    shoppingCart = shoppingCart.filter(p => p.id !== productId);
+    showNotification('Produto removido da cesta.');
+    closeSaleModal();
+    updateCartFloatingButton();
+    loadProducts();
+}
+
+function clearCart() {
+    if (confirm('Tem certeza que deseja remover todos os itens da cesta?')) {
+        shoppingCart = [];
+        closeCheckoutModal();
+        updateCartFloatingButton();
+        loadProducts();
+        showNotification('Cesta esvaziada!');
+    }
+}
+
+async function openCheckoutModal() {
+    if (shoppingCart.length === 0) return;
+
+    if (!document.getElementById('checkoutModal')) {
+        const modalHtml = `
+            <div id="checkoutModal" class="modal-overlay">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Finalizar Venda (Cesta)</h3>
+                        <button class="close-modal" onclick="closeCheckoutModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <div style="display: flex; justify-content: flex-end; margin-bottom: 5px;">
+                            <button onclick="clearCart()" style="color: #dc3545; background: none; border: none; font-size: 0.9em; cursor: pointer; text-decoration: underline;">🗑️ Esvaziar Cesta</button>
+                        </div>
+                        <div id="checkoutItemsList" style="max-height: 300px; overflow-y: auto; margin-bottom: 15px;"></div>
+                        <div style="text-align: right; font-weight: bold; font-size: 1.2em; margin-bottom: 15px; color: #2c1810;" id="checkoutTotal"></div>
+                        
+                        <select id="checkoutClient" class="input-field" onchange="handleCheckoutClientChange()">
+                            <option value="">Selecione o Cliente</option>
+                        </select>
+                        <input type="text" id="checkoutQuickClientName" placeholder="Nome do Novo Cliente" class="input-field" style="display: none;">
+                        
+                        <div id="checkoutPaymentOptions" style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 15px;">
+                            ${getPaymentFormHtml('checkout')}
+                        </div>
+                        
+                        <button class="btn-primary" onclick="confirmBatchSale()" style="width: 100%;">Confirmar Venda</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+
+    const list = document.getElementById('checkoutItemsList');
+    list.innerHTML = shoppingCart.map(item => `
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid #eee;">
+            <div>
+                <div style="font-weight: 600;">${item.name}</div>
+                <div style="font-size: 0.85em; color: #666;">${item.code}</div>
+            </div>
+            <div style="text-align: right;">
+                <div>${formatCurrency(item.price)}</div>
+                <button onclick="removeFromCartAndRefresh('${item.id}')" style="color: #dc3545; background: none; border: none; font-size: 0.8em; cursor: pointer;">Remover</button>
+            </div>
+        </div>
+    `).join('');
+
+    const total = shoppingCart.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+    document.getElementById('checkoutTotal').textContent = `Total: ${formatCurrency(total)}`;
+
+    showLoading();
+    try {
+        const clientsSnapshot = await clientsRef.orderByChild('resellerId').equalTo(currentUser.uid).once('value');
+        const select = document.getElementById('checkoutClient');
+        select.innerHTML = '<option value="">Selecione o Cliente</option>' +
+            '<option value="new">+ Novo Cliente</option>';
+        
+        clientsSnapshot.forEach(child => {
+            const c = child.val();
+            select.innerHTML += `<option value="${child.key}">${c.name}</option>`;
+        });
+        
+        document.getElementById('checkoutModal').classList.add('active');
+    } catch (e) {
+        console.error(e);
+    }
+    hideLoading();
+}
+
+function closeCheckoutModal() {
+    document.getElementById('checkoutModal').classList.remove('active');
+    document.getElementById('checkoutClient').value = '';
+    document.getElementById('checkoutQuickClientName').style.display = 'none';
+    if(document.getElementById('checkoutPaymentMethod')) document.getElementById('checkoutPaymentMethod').value = '';
+}
+
+function removeFromCartAndRefresh(productId) {
+    shoppingCart = shoppingCart.filter(p => p.id !== productId);
+    if (shoppingCart.length === 0) {
+        closeCheckoutModal();
+    } else {
+        openCheckoutModal();
+    }
+    updateCartFloatingButton();
+    loadProducts();
+}
+
+function handleCheckoutClientChange() {
+    const select = document.getElementById('checkoutClient');
+    const input = document.getElementById('checkoutQuickClientName');
+    input.style.display = select.value === 'new' ? 'block' : 'none';
+}
+
+async function confirmBatchSale() {
+    const select = document.getElementById('checkoutClient');
+    let clientId = select.value;
+    let clientName = '';
+    
+    if (!clientId) {
+        showNotification('Selecione um cliente', 'error');
+        return;
+    }
+
+    showLoading();
+
+    try {
+        if (clientId === 'new') {
+            const newName = document.getElementById('checkoutQuickClientName').value.trim();
+            if (!newName) {
+                hideLoading();
+                showNotification('Digite o nome do cliente', 'error');
+                return;
+            }
+            const newClientId = generateId();
+            await clientsRef.child(newClientId).set({
+                resellerId: currentUser.uid,
+                name: newName,
+                phone: '',
+                email: '',
+                notes: 'Cadastrado na venda (Cesta)',
+                createdAt: firebase.database.ServerValue.TIMESTAMP
+            });
+            clientId = newClientId;
+            clientName = newName;
+        } else {
+            const clientSnapshot = await clientsRef.child(clientId).once('value');
+            clientName = clientSnapshot.val().name;
+        }
+
+        // Capturar dados de pagamento (Grupo)
+        const method = document.getElementById('checkoutPaymentMethod').value;
+        let paymentStatus = 'pending';
+        let paymentData = null;
+        const groupId = generateId(); // ID único para agrupar estas vendas
+
+        if (method) {
+            paymentStatus = 'paid';
+            const hasInstallment = document.getElementById('checkoutHasInstallment').checked;
+            
+            if (hasInstallment) {
+                paymentStatus = 'installment';
+            }
+
+            paymentData = {
+                method: method,
+                installments: hasInstallment ? parseInt(document.getElementById('checkoutInstallmentCount').value) : null,
+                installmentValue: null,
+                date: firebase.database.ServerValue.TIMESTAMP
+            };
+
+            if (hasInstallment) {
+                const installmentsList = [];
+                const inputs = document.querySelectorAll('.checkout-installment-input');
+                if (inputs.length > 0) {
+                    inputs.forEach((input, index) => {
+                        installmentsList.push({ 
+                            number: index + 1, 
+                            status: 'pending', 
+                            paidAt: null,
+                            value: parseFloat(input.value)
+                        });
+                    });
+                    paymentData.installmentsList = installmentsList;
+                    paymentData.installmentValue = installmentsList[0].value;
+                }
+            }
+        }
+
+        const updates = {};
+        shoppingCart.forEach(item => {
+            const saleId = generateId();
+            updates[`sales/${saleId}`] = {
+                productId: item.id,
+                productName: item.name,
+                productCode: item.code,
+                price: item.price,
+                clientId: clientId,
+                clientName: clientName,
+                resellerId: currentUser.uid,
+                date: firebase.database.ServerValue.TIMESTAMP,
+                paymentStatus: paymentStatus,
+                groupId: groupId // Vincula ao grupo
+            };
+        });
+
+        await database.ref().update(updates);
+
+        // Se houve pagamento, registrar UM pagamento vinculado ao groupId
+        if (paymentData) {
+            const paymentId = generateId();
+            await paymentsRef.child(paymentId).set({
+                groupId: groupId, // Link pelo grupo
+                ...paymentData
+            });
+        }
+
+        shoppingCart = [];
+        closeCheckoutModal();
+        updateCartFloatingButton();
+        loadProducts();
+        loadSoldProducts();
+        updateDashboard();
+        hideLoading();
+        showNotification('Venda realizada com sucesso!');
+
+    } catch (error) {
+        hideLoading();
+        console.error('Erro na venda em lote:', error);
         showNotification('Erro ao registrar venda', 'error');
     }
 }
@@ -3499,48 +3857,244 @@ async function loadSoldProducts() {
             return;
         }
         
-        container.innerHTML = sales.reverse().map(sale => `
-            <div class="sale-item">
+        // Agrupar vendas por groupId ou id (se individual)
+        const groups = {};
+        sales.forEach(sale => {
+            const key = sale.groupId || sale.id;
+            if (!groups[key]) {
+                groups[key] = {
+                    id: key,
+                    isGroup: !!sale.groupId,
+                    date: sale.date,
+                    clientName: sale.clientName,
+                    clientId: sale.clientId,
+                    items: [],
+                    totalPrice: 0,
+                    paymentStatus: sale.paymentStatus
+                };
+            }
+            groups[key].items.push(sale);
+            groups[key].totalPrice += sale.price;
+            // Manter a data mais recente do grupo
+            if (sale.date > groups[key].date) groups[key].date = sale.date;
+        });
+
+        const sortedGroups = Object.values(groups).sort((a, b) => b.date - a.date);
+
+        container.innerHTML = sortedGroups.map(group => {
+            const itemCount = group.items.length;
+            const title = group.isGroup ? `Venda em Lote (${itemCount} itens)` : group.items[0].productName;
+            
+            return `
+            <div class="sale-item" onclick="openSaleDetailsModal('${group.id}', ${group.isGroup})" style="cursor: pointer;">
                 <div class="sale-header">
-                    <span class="sale-product">${sale.productName}</span>
-                    <span class="sale-price">${formatCurrency(sale.price)}</span>
+                    <span class="sale-product">${title}</span>
+                    <span class="sale-price">${formatCurrency(group.totalPrice)}</span>
                 </div>
                 <div class="sale-details">
-                    Cliente: ${sale.clientName} | ${formatDate(sale.date)}
+                    ${group.isGroup ? '<span style="background:#e3f2fd; color:#0d47a1; padding:2px 6px; border-radius:4px; font-size:0.8em; margin-right:5px;">📦 Agrupado</span>' : ''}
+                    Cliente: ${group.clientName} | ${formatDate(group.date)}
                 </div>
-                <span class="payment-status ${sale.paymentStatus}">${
-                    sale.paymentStatus === 'paid' ? 'Pago' : 
-                    sale.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'
+                <span class="payment-status ${group.paymentStatus}">${
+                    group.paymentStatus === 'paid' ? 'Pago' : 
+                    group.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'
                 }</span>
-                <div class="sale-actions" style="margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px; display: flex; gap: 10px; justify-content: flex-end;">
-                    <button class="btn-secondary" onclick="openEditSaleModal('${sale.id}')" style="padding: 5px 15px; font-size: 14px;">Editar</button>
-                    <button class="btn-delete" onclick="cancelSale('${sale.id}')" style="padding: 5px 15px; font-size: 14px; background-color: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer;">Cancelar</button>
+                <div style="text-align: right; margin-top: 8px; font-size: 0.85em; color: #666; border-top: 1px solid #eee; padding-top: 5px;">
+                    Clique para gerenciar
                 </div>
             </div>
-        `).join('');
+            `;
+        }).join('');
     } catch (error) {
         console.error('Erro ao carregar vendas:', error);
     }
 }
 
+async function openSaleDetailsModal(targetId, isGroup) {
+    showLoading();
+    
+    // Injetar modal se não existir
+    if (!document.getElementById('saleDetailsModal')) {
+        const modalHtml = `
+            <div id="saleDetailsModal" class="modal-overlay">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Detalhes da Venda</h3>
+                        <button class="close-modal" onclick="closeSaleDetailsModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="saleDetailsInfo" style="margin-bottom: 15px; padding: 10px; background: #f8f9fa; border-radius: 8px;"></div>
+                        <h4 style="margin-bottom: 10px;">Itens</h4>
+                        <div id="saleDetailsList" style="max-height: 300px; overflow-y: auto;"></div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+
+    try {
+        let items = [];
+
+        if (isGroup) {
+            const snapshot = await salesRef.orderByChild('groupId').equalTo(targetId).once('value');
+            snapshot.forEach(c => items.push({ id: c.key, ...c.val() }));
+        } else {
+            const snapshot = await salesRef.child(targetId).once('value');
+            if (snapshot.exists()) {
+                items.push({ id: snapshot.key, ...snapshot.val() });
+            }
+        }
+
+        if (items.length === 0) {
+            hideLoading();
+            closeSaleDetailsModal();
+            loadSoldProducts(); // Atualizar lista principal se estiver vazia
+            return;
+        }
+
+        const first = items[0];
+        const total = items.reduce((sum, i) => sum + i.price, 0);
+
+        document.getElementById('saleDetailsInfo').innerHTML = `
+            <p><strong>Cliente:</strong> ${first.clientName}</p>
+            <p><strong>Data:</strong> ${formatDate(first.date)}</p>
+            <p><strong>Total:</strong> ${formatCurrency(total)}</p>
+            <p><strong>Status:</strong> ${first.paymentStatus === 'paid' ? 'Pago' : first.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'}</p>
+        `;
+
+        const listContainer = document.getElementById('saleDetailsList');
+        listContainer.innerHTML = items.map(item => `
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid #eee;">
+                <div>
+                    <div style="font-weight: 600;">${item.productName}</div>
+                    <div style="font-size: 0.9em; color: #666;">${formatCurrency(item.price)}</div>
+                </div>
+                <div style="display: flex; gap: 5px;">
+                    <button class="btn-secondary" onclick="openEditSaleModal('${item.id}')" style="padding: 4px 8px; font-size: 0.8em;">Editar</button>
+                    <button class="btn-delete" onclick="handleDetailCancellation('${item.id}', '${targetId}', ${isGroup})" style="padding: 4px 8px; font-size: 0.8em; background-color: #dc3545; color: white; border: none; border-radius: 4px;">Cancelar</button>
+                </div>
+            </div>
+        `).join('');
+
+        document.getElementById('saleDetailsModal').classList.add('active');
+        hideLoading();
+    } catch (error) {
+        hideLoading();
+        console.error('Erro ao abrir detalhes:', error);
+        showNotification('Erro ao carregar detalhes', 'error');
+    }
+}
+
+function closeSaleDetailsModal() {
+    const modal = document.getElementById('saleDetailsModal');
+    if (modal) modal.classList.remove('active');
+}
+
+async function handleDetailCancellation(saleId, groupId, isGroup) {
+    const success = await cancelSale(saleId);
+    if (success) {
+        // Recarregar o modal para mostrar os itens restantes
+        openSaleDetailsModal(groupId, isGroup);
+    }
+}
+
 async function cancelSale(saleId) {
-    if (!confirm('Tem certeza que deseja cancelar esta venda? O produto voltará para o estoque e pagamentos associados serão removidos.')) return;
+    if (!confirm('Tem certeza que deseja cancelar esta venda? O produto voltará para o estoque.')) return false;
 
     showLoading();
 
     try {
-        // 1. Remover a venda
+        // 1. Buscar dados da venda antes de excluir para verificar grupo
+        const saleSnapshot = await salesRef.child(saleId).once('value');
+        const sale = saleSnapshot.val();
+
+        if (!sale) {
+            hideLoading();
+            showNotification('Venda já foi removida ou não existe.', 'error');
+            loadSoldProducts();
+            return false;
+        }
+
+        // 2. Remover a venda
         await salesRef.child(saleId).remove();
 
-        // 2. Remover pagamentos associados
-        const paymentsSnapshot = await paymentsRef.orderByChild('saleId').equalTo(saleId).once('value');
-        const updates = {};
-        paymentsSnapshot.forEach(child => {
-            updates[child.key] = null;
-        });
-        
-        if (Object.keys(updates).length > 0) {
-            await paymentsRef.update(updates);
+        // 3. Gerenciar pagamentos
+        if (sale.groupId) {
+            // Se for parte de um grupo, verificar se ainda existem itens nesse grupo
+            const groupSnapshot = await salesRef.orderByChild('groupId').equalTo(sale.groupId).once('value');
+            
+            // Se não existem mais itens, remover o pagamento do grupo
+            if (!groupSnapshot.exists() || groupSnapshot.numChildren() === 0) {
+                const paymentsSnapshot = await paymentsRef.orderByChild('groupId').equalTo(sale.groupId).once('value');
+                const updates = {};
+                paymentsSnapshot.forEach(child => updates[child.key] = null);
+                if (Object.keys(updates).length > 0) await paymentsRef.update(updates);
+            } else {
+                // RECALCULAR PARCELAS AUTOMATICAMENTE
+                const remainingSales = [];
+                groupSnapshot.forEach(child => remainingSales.push(child.val()));
+                const newTotal = remainingSales.reduce((sum, s) => sum + (Number(s.price) || 0), 0);
+
+                const paymentsSnapshot = await paymentsRef.orderByChild('groupId').equalTo(sale.groupId).once('value');
+                if (paymentsSnapshot.exists()) {
+                    let paymentId = null;
+                    let paymentData = null;
+                    paymentsSnapshot.forEach(child => {
+                        paymentId = child.key;
+                        paymentData = child.val();
+                    });
+
+                    if (paymentData && paymentData.installments) {
+                        let list = paymentData.installmentsList;
+                        // Gerar lista se não existir (legado)
+                        if (!list) {
+                            list = Array.from({length: paymentData.installments}, (_, i) => ({
+                                number: i + 1, status: 'pending', paidAt: null, value: parseFloat(paymentData.installmentValue)
+                            }));
+                        }
+
+                        // Calcular quanto já foi pago
+                        const totalPaid = list.reduce((sum, inst) => inst.status === 'paid' ? sum + (Number(inst.value) || 0) : sum, 0);
+                        
+                        // Novo valor restante a ser distribuído nas parcelas pendentes
+                        let remainingToPay = Math.max(0, newTotal - totalPaid);
+                        
+                        const pendingCount = list.filter(inst => inst.status === 'pending').length;
+
+                        if (pendingCount > 0) {
+                            const newBaseValue = Math.floor((remainingToPay / pendingCount) * 100) / 100;
+                            let remainder = Math.round((remainingToPay - (newBaseValue * pendingCount)) * 100) / 100;
+
+                            list.forEach(inst => {
+                                if (inst.status === 'pending') {
+                                    let val = newBaseValue;
+                                    if (remainder > 0.001) {
+                                        val = (val * 100 + 1) / 100;
+                                        remainder = (remainder * 100 - 1) / 100;
+                                    }
+                                    inst.value = val;
+                                }
+                            });
+
+                            await paymentsRef.child(paymentId).update({
+                                installmentsList: list,
+                                installmentValue: list.find(i => i.status === 'pending')?.value || 0
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            // Venda individual: remover pagamento associado
+            const paymentsSnapshot = await paymentsRef.orderByChild('saleId').equalTo(saleId).once('value');
+            const updates = {};
+            paymentsSnapshot.forEach(child => {
+                updates[child.key] = null;
+            });
+            if (Object.keys(updates).length > 0) {
+                await paymentsRef.update(updates);
+            }
         }
 
         hideLoading();
@@ -3550,10 +4104,12 @@ async function cancelSale(saleId) {
         loadProducts();
         loadSoldProducts();
         updateDashboard();
+        return true;
     } catch (error) {
         hideLoading();
         console.error('Erro ao cancelar venda:', error);
         showNotification('Erro ao cancelar venda', 'error');
+        return false;
     }
 }
 
@@ -3632,6 +4188,32 @@ async function saveSaleEdit() {
         console.error('Erro ao atualizar venda:', error);
         showNotification('Erro ao atualizar venda', 'error');
     }
+}
+
+// Função auxiliar para gerar HTML do formulário de pagamento
+function getPaymentFormHtml(prefix) {
+    return `
+        <label style="display:block; margin-bottom:5px; font-weight:500; color:#666;">Pagamento Imediato (Opcional):</label>
+        <select id="${prefix}PaymentMethod" class="input-field" style="margin-bottom: 10px;">
+            <option value="">Deixar Pendente (Pagar Depois)</option>
+            <option value="money">Dinheiro</option>
+            <option value="credit">Cartão de Crédito</option>
+            <option value="debit">Cartão de Débito</option>
+            <option value="pix">PIX</option>
+            <option value="transfer">Transferência</option>
+        </select>
+        
+        <div class="installment-section">
+            <label class="checkbox-label">
+                <input type="checkbox" id="${prefix}HasInstallment" onchange="document.getElementById('${prefix}InstallmentFields').style.display = this.checked ? 'block' : 'none'">
+                Pagamento Parcelado
+            </label>
+            <div id="${prefix}InstallmentFields" style="display: none;">
+                <input type="number" id="${prefix}InstallmentCount" placeholder="Número de Parcelas" class="input-field" min="2" max="24" oninput="generateGenericInstallmentInputs('${prefix}')">
+                <div id="${prefix}DynamicInstallmentsContainer" style="margin-top: 10px; max-height: 200px; overflow-y: auto; padding-right: 5px;"></div>
+            </div>
+        </div>
+    `;
 }
 
 // ============================================
@@ -3856,7 +4438,10 @@ async function loadPayments() {
 
         const payments = {};
         paymentsSnapshot.forEach((child) => {
-            payments[child.val().saleId] = { id: child.key, ...child.val() };
+            const p = child.val();
+            // Mapear por saleId OU groupId
+            const key = p.groupId || p.saleId;
+            payments[key] = { id: child.key, ...p };
         });
 
         const container = document.getElementById('paymentsList');
@@ -3871,9 +4456,38 @@ async function loadPayments() {
             hideLoading();
             return;
         }
+
+        // Agrupar vendas por groupId
+        const groupedSales = [];
+        const processedGroupIds = new Set();
+
+        // Ordenar vendas por data (mais recente primeiro)
+        sales.sort((a, b) => b.date - a.date);
+
+        sales.forEach(sale => {
+            if (sale.groupId) {
+                if (!processedGroupIds.has(sale.groupId)) {
+                    // Encontrar todas as vendas deste grupo
+                    const groupItems = sales.filter(s => s.groupId === sale.groupId);
+                    const totalPrice = groupItems.reduce((sum, s) => sum + s.price, 0);
+                    
+                    groupedSales.push({
+                        ...sale, // Usa dados da primeira venda como base (data, cliente)
+                        isGroup: true,
+                        items: groupItems,
+                        totalPrice: totalPrice,
+                        displayId: sale.groupId // ID para buscar pagamento
+                    });
+                    processedGroupIds.add(sale.groupId);
+                }
+            } else {
+                // Venda individual
+                groupedSales.push({ ...sale, isGroup: false, totalPrice: sale.price, displayId: sale.id });
+            }
+        });
         
-        container.innerHTML = sales.reverse().map(sale => {
-            const payment = payments[sale.id];
+        container.innerHTML = groupedSales.map(item => {
+            const payment = payments[item.displayId];
             let installmentsHtml = '';
 
             if (payment && payment.installments) {
@@ -3898,26 +4512,38 @@ async function loadPayments() {
                 </div>`;
             }
             
+            // Renderizar conteúdo do item (único ou lista de grupo)
+            let productContent = '';
+            if (item.isGroup) {
+                productContent = `
+                    <div style="margin-bottom: 5px;"><strong>📦 Venda em Lote (${item.items.length} itens)</strong></div>
+                    <ul style="font-size: 0.85em; color: #666; padding-left: 20px; margin-bottom: 5px;">
+                        ${item.items.map(i => `<li>${i.productName} - ${formatCurrency(i.price)}</li>`).join('')}
+                    </ul>
+                `;
+            } else {
+                productContent = `<span class="sale-product">${item.productName}</span>`;
+            }
+
             return `
                 <div class="payment-item">
                     <div class="payment-header">
-                        <span class="sale-product">${sale.productName}</span>
-                        <span class="payment-amount">${formatCurrency(sale.price)}</span>
+                        <div style="flex:1">${productContent}</div>
+                        <span class="payment-amount" style="align-self: flex-start; margin-left: 10px;">${formatCurrency(item.totalPrice)}</span>
                     </div>
                     <div class="payment-details">
-                        Cliente: ${sale.clientName} | ${formatDate(sale.date)}
+                        Cliente: ${item.clientName} | ${formatDate(item.date)}
                         ${payment && payment.method ? `<br>Pagamento: ${payment.method} ${payment.installments ? `(${payment.installments}x)` : ''} 
-                        <button class="btn-secondary" onclick="openEditPaymentModal('${payment.id}', '${sale.id}')" style="padding: 2px 8px; font-size: 10px; margin-left: 5px; background-color: #4a90e2; color: white; border: none; border-radius: 3px; cursor: pointer;">Editar</button>
-                        <button class="btn-delete" onclick="deletePayment('${payment.id}', '${sale.id}')" style="padding: 2px 8px; font-size: 10px; margin-left: 5px; background-color: #dc3545; color: white; border: none; border-radius: 3px; cursor: pointer;">Excluir</button>` : ''}
+                        <button class="btn-delete" onclick="deletePayment('${payment.id}', '${item.displayId}', ${item.isGroup})" style="padding: 2px 8px; font-size: 10px; margin-left: 5px; background-color: #dc3545; color: white; border: none; border-radius: 3px; cursor: pointer;">Excluir Pagamento</button>` : ''}
                     </div>
                     ${installmentsHtml}
-                    <span class="payment-status ${sale.paymentStatus}">${
-                        sale.paymentStatus === 'paid' ? 'Pago' : 
-                        sale.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'
+                    <span class="payment-status ${item.paymentStatus}">${
+                        item.paymentStatus === 'paid' ? 'Pago' : 
+                        item.paymentStatus === 'installment' ? 'Parcelado' : 'Pendente'
                     }</span>
-                    ${sale.paymentStatus === 'pending' ? `
+                    ${item.paymentStatus === 'pending' ? `
                         <div class="payment-actions">
-                            <button class="btn-payment" onclick="openPaymentModal('${sale.id}')">Registrar Pagamento</button>
+                            <button class="btn-payment" onclick="openPaymentModal('${item.displayId}', ${item.isGroup})">Registrar Pagamento</button>
                         </div>
                     ` : ''}
                 </div>
@@ -4071,15 +4697,27 @@ async function updateInstallmentStatus(paymentId, index, dateTimestamp, paidAmou
     }
 }
 
-async function deletePayment(paymentId, saleId) {
+async function deletePayment(paymentId, targetId, isGroup) {
     if (!confirm('Tem certeza que deseja excluir este pagamento? O status da venda voltará para pendente.')) return;
     
     showLoading();
     try {
         await paymentsRef.child(paymentId).remove();
-        await salesRef.child(saleId).update({
-            paymentStatus: 'pending'
-        });
+        
+        if (isGroup) {
+            // Se for grupo, targetId é o groupId. Precisamos achar todas as vendas desse grupo
+            const snapshot = await salesRef.orderByChild('groupId').equalTo(targetId).once('value');
+            const updates = {};
+            snapshot.forEach(child => {
+                updates[`sales/${child.key}/paymentStatus`] = 'pending';
+            });
+            if (Object.keys(updates).length > 0) {
+                await database.ref().update(updates);
+            }
+        } else {
+            // Venda única
+            await salesRef.child(targetId).update({ paymentStatus: 'pending' });
+        }
         
         hideLoading();
         showNotification('Pagamento excluído com sucesso!');
@@ -4242,23 +4880,43 @@ function filterPayments() {
     });
 }
 
-async function openPaymentModal(saleId) {
+async function openPaymentModal(targetId, isGroup) {
     showLoading();
 
     try {
-        const snapshot = await salesRef.child(saleId).once('value');
-        selectedSale = {
-            id: saleId,
-            ...snapshot.val()
-        };
+        let infoHtml = '';
+        let totalPrice = 0;
+
+        if (isGroup) {
+            const snapshot = await salesRef.orderByChild('groupId').equalTo(targetId).once('value');
+            const items = [];
+            snapshot.forEach(c => items.push(c.val()));
+            
+            totalPrice = items.reduce((sum, i) => sum + i.price, 0);
+            const firstItem = items[0];
+            
+            selectedSale = { id: targetId, isGroup: true, price: totalPrice, clientName: firstItem.clientName }; // Objeto temporário para o modal
+            
+            infoHtml = `
+                <div class="product-info">
+                    <h3>Venda em Lote (${items.length} itens)</h3>
+                    <p>Cliente: ${firstItem.clientName}</p>
+                    <p class="product-price">${formatCurrency(totalPrice)}</p>
+                </div>`;
+        } else {
+            const snapshot = await salesRef.child(targetId).once('value');
+            const sale = snapshot.val();
+            selectedSale = { id: targetId, isGroup: false, ...sale };
+            
+            infoHtml = `
+                <div class="product-info">
+                    <h3>${sale.productName}</h3>
+                    <p>Cliente: ${sale.clientName}</p>
+                    <p class="product-price">${formatCurrency(sale.price)}</p>
+                </div>`;
+        }
         
-        document.getElementById('paymentSaleInfo').innerHTML = `
-            <div class="product-info">
-                <h3>${selectedSale.productName}</h3>
-                <p>Cliente: ${selectedSale.clientName}</p>
-                <p class="product-price">${formatCurrency(selectedSale.price)}</p>
-            </div>
-        `;
+        document.getElementById('paymentSaleInfo').innerHTML = infoHtml;
         
         document.getElementById('paymentModal').classList.add('active');
         hideLoading();
@@ -4308,6 +4966,46 @@ function generateInstallmentInputs() {
         div.innerHTML = `
             <span style="font-size: 0.9em; min-width: 70px;">Parcela ${i}:</span>
             <input type="number" class="input-field installment-input" step="0.01" value="${val.toFixed(2)}" style="margin-bottom: 0;">
+        `;
+        container.appendChild(div);
+    }
+}
+
+function generateGenericInstallmentInputs(prefix) {
+    const countInput = document.getElementById(`${prefix}InstallmentCount`);
+    const container = document.getElementById(`${prefix}DynamicInstallmentsContainer`);
+    
+    if (!countInput || !container) return;
+    
+    const count = parseInt(countInput.value);
+    container.innerHTML = '';
+
+    if (!count || count < 2) return;
+
+    let total = 0;
+    if (prefix === 'sale') {
+        if (selectedProduct) total = selectedProduct.price;
+    } else if (prefix === 'checkout') {
+        total = shoppingCart.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+    } else {
+        return;
+    }
+
+    const baseValue = Math.floor((total / count) * 100) / 100;
+    let remainder = Math.round((total - (baseValue * count)) * 100) / 100;
+
+    for (let i = 1; i <= count; i++) {
+        let val = baseValue;
+        if (remainder > 0.001) {
+            val = (val * 100 + 1) / 100;
+            remainder = (remainder * 100 - 1) / 100;
+        }
+        
+        const div = document.createElement('div');
+        div.style.cssText = "display: flex; gap: 10px; margin-bottom: 5px; align-items: center;";
+        div.innerHTML = `
+            <span style="font-size: 0.9em; min-width: 70px;">Parcela ${i}:</span>
+            <input type="number" class="input-field ${prefix}-installment-input" step="0.01" value="${val.toFixed(2)}" style="margin-bottom: 0;">
         `;
         container.appendChild(div);
     }
@@ -4376,7 +5074,8 @@ async function confirmPayment() {
     try {
         const paymentId = generateId();
         const paymentData = {
-            saleId: selectedSale.id,
+            saleId: selectedSale.isGroup ? null : selectedSale.id,
+            groupId: selectedSale.isGroup ? selectedSale.id : null, // Se for grupo, o ID armazenado em selectedSale.id é o groupId
             method: method,
             installments: installments,
             installmentValue: installmentValue,
@@ -4400,9 +5099,20 @@ async function confirmPayment() {
 
         await paymentsRef.child(paymentId).set(paymentData);
 
-        await salesRef.child(selectedSale.id).update({
-            paymentStatus: hasInstallment ? 'installment' : 'paid'
-        });
+        const newStatus = hasInstallment ? 'installment' : 'paid';
+
+        if (selectedSale.isGroup) {
+            const snapshot = await salesRef.orderByChild('groupId').equalTo(selectedSale.id).once('value');
+            const updates = {};
+            snapshot.forEach(child => {
+                updates[`sales/${child.key}/paymentStatus`] = newStatus;
+            });
+            if (Object.keys(updates).length > 0) {
+                await database.ref().update(updates);
+            }
+        } else {
+            await salesRef.child(selectedSale.id).update({ paymentStatus: newStatus });
+        }
 
         closePaymentModal();
         hideLoading();
