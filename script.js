@@ -510,7 +510,9 @@ async function loadPendingSettlements() {
     try {
         const snapshot = await settlementsRef.orderByChild('status').equalTo('pending').once('value');
         const settlements = [];
-        snapshot.forEach(child => settlements.push({ id: child.key, ...child.val() }));
+        snapshot.forEach(child => {
+            settlements.push({ id: child.key, ...child.val() });
+        });
 
         const wrapper = document.getElementById('adminSettlementsContainer');
         
@@ -2847,7 +2849,9 @@ async function loadResellerRanking() {
         // Buscar todas as vendas para calcular o ranking geral
         const snapshot = await salesRef.once('value');
         const sales = [];
-        snapshot.forEach(child => sales.push(child.val()));
+        snapshot.forEach(child => {
+            sales.push(child.val());
+        });
 
         const now = new Date();
         const currentMonth = now.getMonth();
@@ -4917,7 +4921,9 @@ async function openPaymentModal(targetId, isGroup) {
         if (isGroup) {
             const snapshot = await salesRef.orderByChild('groupId').equalTo(targetId).once('value');
             const items = [];
-            snapshot.forEach(c => items.push(c.val()));
+            snapshot.forEach(c => {
+                items.push(c.val());
+            });
             
             totalPrice = items.reduce((sum, i) => sum + i.price, 0);
             const firstItem = items[0];
