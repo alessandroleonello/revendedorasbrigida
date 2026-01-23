@@ -3386,18 +3386,38 @@ async function openSaleModal(productId) {
             </div>
         `;
 
-        // Injetar Botão de Carrinho
-        let cartBtn = document.getElementById('btnAddToCart');
-        if (!cartBtn) {
-            cartBtn = document.createElement('button');
-            cartBtn.id = 'btnAddToCart';
-            cartBtn.className = 'btn-secondary';
-            cartBtn.style.marginBottom = '15px';
-            cartBtn.style.background = '#e3f2fd';
-            cartBtn.style.color = '#0d47a1';
-            cartBtn.style.borderColor = '#0d47a1';
+        // Injetar Container de Ações do Carrinho (Quantidade + Botão)
+        let cartActionsDiv = document.getElementById('cartActionsDiv');
+        if (!cartActionsDiv) {
+            cartActionsDiv = document.createElement('div');
+            cartActionsDiv.id = 'cartActionsDiv';
+            cartActionsDiv.style.display = 'flex';
+            cartActionsDiv.style.gap = '10px';
+            cartActionsDiv.style.marginBottom = '15px';
+            
+            const qtyInput = document.createElement('input');
+            qtyInput.type = 'number';
+            qtyInput.id = 'cartQuantityInput';
+            qtyInput.className = 'input-field';
+            qtyInput.value = '1';
+            qtyInput.min = '1';
+            qtyInput.style.width = '80px';
+            qtyInput.style.marginBottom = '0';
+            
+            const addBtn = document.createElement('button');
+            addBtn.id = 'btnAddToCart';
+            addBtn.className = 'btn-secondary';
+            addBtn.style.marginBottom = '0';
+            addBtn.style.flex = '1';
+            addBtn.style.background = '#e3f2fd';
+            addBtn.style.color = '#0d47a1';
+            addBtn.style.borderColor = '#0d47a1';
+            
+            cartActionsDiv.appendChild(qtyInput);
+            cartActionsDiv.appendChild(addBtn);
+            
             const select = document.getElementById('saleClient');
-            select.parentNode.insertBefore(cartBtn, select);
+            select.parentNode.insertBefore(cartActionsDiv, select);
         }
         
         // Injetar campos de pagamento no modal de venda
@@ -3410,9 +3430,17 @@ async function openSaleModal(productId) {
             document.getElementById('quickClientName').parentNode.insertBefore(paymentDiv, document.getElementById('quickClientName').nextSibling);
         }
 
-        const isInCart = shoppingCart.some(p => p.id === selectedProduct.id);
-        cartBtn.textContent = isInCart ? '❌ Remover da Cesta' : '🛒 Adicionar à Cesta';
-        cartBtn.onclick = isInCart ? () => removeFromCart(selectedProduct.id) : () => addToCart(selectedProduct);
+        // Resetar e configurar
+        const qtyInput = document.getElementById('cartQuantityInput');
+        if (qtyInput) qtyInput.value = '1';
+
+        const cartCount = shoppingCart.filter(p => p.id === selectedProduct.id).length;
+        const addBtn = document.getElementById('btnAddToCart');
+        addBtn.textContent = `🛒 Adicionar à Cesta ${cartCount > 0 ? `(${cartCount})` : ''}`;
+        addBtn.onclick = () => {
+            const qty = parseInt(document.getElementById('cartQuantityInput').value) || 1;
+            addToCart(selectedProduct, qty);
+        };
         
         const clients = [];
         clientsSnapshot.forEach((child) => {
@@ -3586,10 +3614,9 @@ function updateCartFloatingButton() {
     }
 }
 
-function addToCart(product) {
-    if (!shoppingCart.some(p => p.id === product.id)) {
+function addToCart(product, quantity = 1) {
+    for (let i = 0; i < quantity; i++) {
         shoppingCart.push(product);
-        showNotification('Produto adicionado à cesta!');
     }
     closeSaleModal();
     updateCartFloatingButton();
