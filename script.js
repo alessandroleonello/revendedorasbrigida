@@ -2942,13 +2942,18 @@ async function openSettlementModal() {
         ]);
 
         const sales = [];
-        salesSnapshot.forEach(child => sales.push(child.val()));
+        salesSnapshot.forEach(child => {
+            sales.push(child.val());
+        });
 
         const goals = goalsSnapshot.val() || {};
         const allProducts = productsSnapshot.val() || {};
         
+        // Filtrar vendas pendentes para cálculo financeiro (evita cobrar vendas já acertadas)
+        const pendingSales = sales.filter(s => !s.isSettled);
+
         // Calcular totais
-        const totalSales = sales.reduce((sum, sale) => sum + sale.price, 0);
+        const totalSales = pendingSales.reduce((sum, sale) => sum + sale.price, 0);
         const totalCommission = calculateTotalCommission(totalSales, goals.commissionTiers || []);
         const totalDue = totalSales - totalCommission;
         
