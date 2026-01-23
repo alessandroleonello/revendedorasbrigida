@@ -2448,7 +2448,9 @@ async function openEditOrderModal(orderId) {
         if (dateInput) dateInput.value = goal.settlementDate || '';
 
         const resellers = [];
-        usersSnapshot.forEach(child => resellers.push({id: child.key, ...child.val()}));
+        usersSnapshot.forEach(child => {
+            resellers.push({id: child.key, ...child.val()});
+        });
         
         const products = {};
         productsSnapshot.forEach(child => {
@@ -2649,7 +2651,9 @@ async function openCloneOrderModal(orderId) {
         select.innerHTML = '<option value="">Selecione a Revendedora</option>';
         
         const resellers = [];
-        snapshot.forEach(child => resellers.push({id: child.key, ...child.val()}));
+        snapshot.forEach(child => {
+            resellers.push({id: child.key, ...child.val()});
+        });
         resellers.sort((a, b) => a.name.localeCompare(b.name));
         
         resellers.forEach(r => {
