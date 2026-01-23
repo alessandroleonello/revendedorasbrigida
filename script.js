@@ -1559,6 +1559,7 @@ async function loadOrders() {
                         <p>📦 ${orderProducts.length} produto(s)</p>
                         <p>📅 ${formatDate(order.createdAt)}</p>
                         <button class="btn-secondary" onclick="openEditOrderModal('${order.id}')" style="margin-top: 5px; padding: 5px 10px; font-size: 12px; margin-right: 5px;">Editar Pedido</button>
+                        <button class="btn-secondary" onclick="openCloneOrderModal('${order.id}')" style="margin-top: 5px; padding: 5px 10px; font-size: 12px; margin-right: 5px; background-color: #17a2b8; color: white; border: none;">Clonar</button>
                         <button class="btn-delete" onclick="deleteOrder('${order.id}')" style="margin-top: 5px; padding: 5px 10px; font-size: 12px;">Excluir Pedido</button>
                     </div>
                 </div>
@@ -2116,6 +2117,35 @@ async function openEditOrderModal(orderId) {
     showLoading();
     currentEditingOrderId = orderId;
 
+    // Injetar modal se não existir
+    if (!document.getElementById('editOrderModal')) {
+        const modalHtml = `
+            <div id="editOrderModal" class="modal-overlay">
+                <div class="modal-content" style="max-width: 800px;">
+                    <div class="modal-header">
+                        <h3>Editar Pedido</h3>
+                        <button class="close-modal" onclick="closeEditOrderModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group">
+                            <label>Revendedora</label>
+                            <select id="editOrderReseller" class="input-field"></select>
+                        </div>
+                        
+                        <div id="editOrderProductsSelection" style="margin-top: 20px;">
+                            <!-- Lista de produtos será injetada aqui -->
+                        </div>
+
+                        <div style="margin-top: 20px; border-top: 1px solid #eee; padding-top: 15px;">
+                            <button class="btn-primary" onclick="saveOrderEdit()" style="width: 100%;">Salvar Alterações</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+
     try {
         const [orderSnapshot, usersSnapshot, productsSnapshot] = await Promise.all([
             ordersRef.child(orderId).once('value'),
@@ -2127,8 +2157,10 @@ async function openEditOrderModal(orderId) {
         const resellers = [];
         usersSnapshot.forEach(child => resellers.push({id: child.key, ...child.val()}));
         
-        const products = [];
-        productsSnapshot.forEach(child => products.push({id: child.key, ...child.val()}));
+        const products = {};
+        productsSnapshot.forEach(child => {
+            products[child.key] = {id: child.key, ...child.val()};
+        });
 
         // Preencher Select de Revendedoras
         const resellerSelect = document.getElementById('editOrderReseller');
@@ -2137,7 +2169,11 @@ async function openEditOrderModal(orderId) {
 
         // Preencher Produtos (Modo Edição Manual)
         const productsContainer = document.getElementById('editOrderProductsSelection');
-        const orderProducts = order.products || [];
+        
+        let orderProducts = order.products || [];
+        if (typeof orderProducts === 'object' && !Array.isArray(orderProducts)) {
+            orderProducts = Object.values(orderProducts);
+        }
         
         productsContainer.innerHTML = `
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
@@ -2148,9 +2184,18 @@ async function openEditOrderModal(orderId) {
         `;
 
         orderProducts.forEach(pid => {
-            const p = products.find(prod => prod.id === pid);
+            const productId = typeof pid === 'object' ? pid.id : pid;
+            const p = products[productId];
             if (p) {
                 addEditOrderItem(p);
+            } else {
+                addEditOrderItem({
+                    id: productId,
+                    name: 'Produto não encontrado (ID: ' + productId + ')',
+                    code: '?',
+                    price: 0,
+                    quantity: 1
+                });
             }
         });
 
@@ -2159,6 +2204,7 @@ async function openEditOrderModal(orderId) {
     } catch (error) {
         hideLoading();
         console.error('Erro ao abrir edição de pedido:', error);
+        showNotification('Erro ao carregar pedido', 'error');
     }
 }
 
@@ -2172,8 +2218,8 @@ function addEditOrderItem(product = null) {
     div.style.alignItems = 'center';
     
     const idValue = product ? product.id : '';
-    const nameValue = product ? product.name : '';
-    const codeValue = product ? product.code : '';
+    const nameValue = product ? String(product.name).replace(/"/g, '&quot;') : '';
+    const codeValue = product ? String(product.code).replace(/"/g, '&quot;') : '';
     const priceValue = product ? product.price : '';
     const qtyValue = product ? product.quantity : '1';
 
@@ -2264,6 +2310,140 @@ async function saveOrderEdit() {
         hideLoading();
         console.error('Erro ao atualizar pedido:', error);
         showNotification('Erro ao atualizar pedido', 'error');
+    }
+}
+
+let currentCloningOrderId = null;
+
+async function openCloneOrderModal(orderId) {
+    currentCloningOrderId = orderId;
+    
+    if (!document.getElementById('cloneOrderModal')) {
+        const modalHtml = `
+            <div id="cloneOrderModal" class="modal-overlay">
+                <div class="modal-content" style="max-width: 500px;">
+                    <div class="modal-header">
+                        <h3>Clonar Pedido</h3>
+                        <button class="close-modal" onclick="closeCloneOrderModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p style="margin-bottom: 15px; color: #666;">Selecione a revendedora para quem deseja copiar este pedido. Novos produtos serão criados com as mesmas características.</p>
+                        <div class="form-group">
+                            <label>Revendedora Destino</label>
+                            <select id="cloneOrderReseller" class="input-field"></select>
+                        </div>
+                        <div style="margin-top: 20px; border-top: 1px solid #eee; padding-top: 15px;">
+                            <button class="btn-primary" onclick="confirmCloneOrder()" style="width: 100%;">Confirmar Clonagem</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+
+    showLoading();
+    try {
+        const snapshot = await usersRef.orderByChild('role').equalTo('reseller').once('value');
+        const select = document.getElementById('cloneOrderReseller');
+        select.innerHTML = '<option value="">Selecione a Revendedora</option>';
+        
+        const resellers = [];
+        snapshot.forEach(child => resellers.push({id: child.key, ...child.val()}));
+        resellers.sort((a, b) => a.name.localeCompare(b.name));
+        
+        resellers.forEach(r => {
+            select.innerHTML += `<option value="${r.id}">${r.name}</option>`;
+        });
+
+        document.getElementById('cloneOrderModal').classList.add('active');
+        hideLoading();
+    } catch (error) {
+        hideLoading();
+        console.error('Erro ao carregar revendedoras:', error);
+        showNotification('Erro ao abrir modal', 'error');
+    }
+}
+
+function closeCloneOrderModal() {
+    const modal = document.getElementById('cloneOrderModal');
+    if (modal) modal.classList.remove('active');
+    currentCloningOrderId = null;
+}
+
+async function confirmCloneOrder() {
+    const targetResellerId = document.getElementById('cloneOrderReseller').value;
+    
+    if (!targetResellerId) {
+        showNotification('Selecione uma revendedora de destino', 'error');
+        return;
+    }
+
+    if (!currentCloningOrderId) return;
+
+    showLoading();
+
+    try {
+        const orderSnapshot = await ordersRef.child(currentCloningOrderId).once('value');
+        const originalOrder = orderSnapshot.val();
+        
+        if (!originalOrder) throw new Error('Pedido original não encontrado');
+
+        let originalProductIds = originalOrder.products || [];
+        if (typeof originalProductIds === 'object' && !Array.isArray(originalProductIds)) {
+            originalProductIds = Object.values(originalProductIds);
+        }
+
+        const productsSnapshot = await productsRef.once('value');
+        const allProducts = productsSnapshot.val() || {};
+        
+        const newProductIds = [];
+        const updates = {};
+
+        originalProductIds.forEach(pid => {
+            const id = typeof pid === 'object' ? pid.id : pid;
+            const productData = allProducts[id];
+
+            if (productData) {
+                const newProductId = generateId();
+                newProductIds.push(newProductId);
+                
+                updates[`products/${newProductId}`] = {
+                    name: productData.name,
+                    code: productData.code,
+                    category: productData.category,
+                    quantity: productData.quantity,
+                    price: productData.price,
+                    barcode: productData.barcode || '',
+                    available: productData.quantity,
+                    createdAt: firebase.database.ServerValue.TIMESTAMP
+                };
+            }
+        });
+
+        if (newProductIds.length === 0) {
+            throw new Error('Nenhum produto válido encontrado para clonar');
+        }
+
+        await database.ref().update(updates);
+
+        const newOrderId = generateId();
+        await ordersRef.child(newOrderId).set({
+            resellerId: targetResellerId,
+            products: newProductIds,
+            createdAt: firebase.database.ServerValue.TIMESTAMP,
+            status: 'active'
+        });
+
+        hideLoading();
+        closeCloneOrderModal();
+        showNotification('Pedido clonado com sucesso!');
+        loadOrders();
+
+    } catch (error) {
+        hideLoading();
+        console.error('Erro ao clonar pedido:', error);
+        showNotification('Erro ao clonar pedido: ' + error.message, 'error');
     }
 }
 
