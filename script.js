@@ -18,6 +18,12 @@ function formatCurrency(value) {
 }
 
 function formatDate(date) {
+    if (!date) return '-';
+    // Se for string YYYY-MM-DD (vindo de input date), ajusta fuso horário para evitar atraso de 1 dia
+    if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        const [year, month, day] = date.split('-').map(Number);
+        return new Date(year, month - 1, day).toLocaleDateString('pt-BR');
+    }
     return new Date(date).toLocaleDateString('pt-BR');
 }
 
